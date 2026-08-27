@@ -1,0 +1,13 @@
+[
+  {
+    "origin": [
+      "https://vinyasanilaya.com",
+      "https://vinyasanilaya-website.web.app",
+      "https://vinyasanilaya-website.firebaseapp.com",
+      "http://localhost:5000"
+    ],
+    "method": ["GET", "POST", "PUT", "DELETE", "HEAD"],
+    "responseHeader": ["Content-Type", "x-goog-resumable", "Authorization"],
+    "maxAgeSeconds": 3600
+  }
+]

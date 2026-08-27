@@ -7,7 +7,7 @@ const firebaseConfig = {
   apiKey: "YOUR_API_KEY",
   authDomain: "vinyasanilaya-website.firebaseapp.com",
   projectId: "vinyasanilaya-website",
-  storageBucket: "vinyasanilaya-website.appspot.com",
+  storageBucket: "vinyasanilaya-website.firebasestorage.app",
   messagingSenderId: "547333535578",
   appId: "YOUR_APP_ID"
 };

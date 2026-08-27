@@ -1,11 +1,1322 @@
+// js/app.js
+import { 
+  collection, 
+  query, 
+  where, 
+  getDocs, 
+  addDoc, 
+  doc, 
+  updateDoc, 
+  serverTimestamp 
+} from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+import { ref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-storage.js";
+import { db, storage } from "./firebase-config.js";
+
+// Global Variables
+let currentStream = null;
+let selfieDataBase64 = null;
+
+
+window.handlePreview = function(input, previewId) {
+  const previewContainer = document.getElementById(previewId);
+  if (input.files && input.files[0]) {
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      previewContainer.innerHTML = `<img src="${e.target.result}" class="img-fluid rounded" style="max-height: 120px; object-fit: contain;">`;
+      updateScanButtonState();
+    };
+    reader.readAsDataURL(input.files[0]);
+  }
+};
+/* ==========================================================================
+   OCR ENGINE & PARSING LOGIC
+   ========================================================================== */
+
+// Helper to convert input files to base64
+async function convertAndCompressToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const maxDimension = 1200; // Resizing for optimal Firestore storage
+        let width = img.width;
+        let height = img.height;
+
+        if (width > maxDimension || height > maxDimension) {
+          const ratio = Math.min(maxDimension / width, maxDimension / height);
+          width *= ratio;
+          height *= ratio;
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+        
+        // Compress to JPEG with 0.7 quality to keep size well under 1MB
+        resolve(canvas.toDataURL('image/jpeg', 0.7));
+      };
+      img.onerror = (err) => reject(err);
+      img.src = event.target.result;
+    };
+    reader.onerror = (err) => reject(err);
+    reader.readAsDataURL(file);
+  });
+}
+
+// Helper to convert dataURL to Blob for Firebase Storage
+function dataURLToBlob(dataURL) {
+  const byteString = atob(dataURL.split(',')[1]);
+  const mimeString = dataURL.split(',')[0].split(':')[1].split(';')[0];
+  const ab = new ArrayBuffer(byteString.length);
+  const ia = new Uint8Array(ab);
+  for (let i = 0; i < byteString.length; i++) {
+    ia[i] = byteString.charCodeAt(i);
+  }
+  return new Blob([ab], { type: mimeString });
+}
+
+let frontImageBase64 = null;
+let backImageBase64 = null;
+
+// Attach event listeners to your file input elements
+['idFrontFile', 'idFrontCamera', 'idBackFile', 'idBackCamera'].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) {
+    el.addEventListener('change', updateScanButtonState);
+  }
+});
+
 /**
- * Phase 1: Dynamically updates ID options based on Nationality radio selection
+ * Handles the click trigger for identity card scanning.
+ */
+window.handleIdScan = async function() {
+  const frontFileInput = document.getElementById('idFrontFile')?.files[0] ? 'idFrontFile' : 'idFrontCamera';
+  const backFileInput = document.getElementById('idBackFile')?.files[0] ? 'idBackFile' : 'idBackCamera';
+
+  const frontFile = document.getElementById(frontFileInput)?.files[0];
+  const backFile = document.getElementById(backFileInput)?.files[0];
+  const currentMobile = document.getElementById('searchMobile')?.value?.replace(/\D/g, '');
+
+  const nationalityEl = document.querySelector('input[name="nationality"]:checked');
+  const nationality = nationalityEl ? nationalityEl.value : 'Indian';
+  const idType = document.getElementById('idType')?.value || 'Document';
+
+  if (!frontFile || !backFile) {
+    return showNotification("Upload Required", "Please upload both Front and Back side images of your ID card.", "warning");
+  }
+  if (!currentMobile) {
+    return showNotification("Mobile Required", "Mobile number is required for registration matching.", "warning");
+  }
+
+  const btn = document.getElementById('scanBtn');
+  const spinner = document.getElementById('scanSpinner');
+  const btnText = document.getElementById('scanBtnText');
+
+  if (btn) btn.disabled = true;
+  if (spinner) spinner.classList.remove('d-none');
+  if (btnText) btnText.innerText = 'Analyzing ' + idType;
+
+  try {
+    // 1. Read both images simultaneously to Base64
+    const [frontBase64, backBase64] = await Promise.all([
+      convertAndCompressToBase64(frontFile),
+      convertAndCompressToBase64(backFile)
+    ]);
+
+    frontImageBase64 = frontBase64;
+    backImageBase64 = backBase64;
+
+    // 2. Execute OCR Extraction via Cloud Run Vision API backend
+    const res = await executeOcrFlow(frontBase64, backBase64, idType, nationality);
+
+    // 3. Verify against backend API to avoid duplicate ID registrations
+    const checkRes = await checkIdMobileAssociation(res.idNumber, currentMobile);
+
+    if (checkRes && checkRes.conflict) {
+      if (btn) {
+        btn.disabled = false;
+        btn.className = "btn btn-indigo w-100 py-3 fw-bold mb-4 shadow-sm";
+        if (btnText) btnText.innerText = 'Verify & Scan Document Now';
+      }
+
+      document.getElementById('name').value = "";
+      document.getElementById('idNumber').value = "";
+      document.getElementById('address').value = "";
+
+      showNotification(
+        "Security Alert", 
+        `This identification document is recorded under another profile (${checkRes.existingName || 'Existing Guest'}).`, 
+        "error"
+      );
+
+      updateScanButtonState();
+      return;
+    }
+
+    // 4. Update Form Fields with parsed details
+    const ocrConfirmEl = document.getElementById('ocrConfirmation');
+    if (ocrConfirmEl) ocrConfirmEl.classList.remove('d-none');
+
+    document.getElementById('name').value = (res.name && res.name !== "Not found") ? res.name : "";
+    document.getElementById('idNumber').value = res.idNumber || "";
+    document.getElementById('address').value = res.address || "";
+
+    if (spinner) spinner.classList.add('d-none');
+    if (btn) {
+      btn.disabled = false;
+      btn.className = "btn btn-success w-100 mb-4 shadow-sm text-white py-3 fw-bold";
+      if (btnText) btnText.innerText = 'Scan Complete ✓';
+    }
+
+    setTimeout(() => {
+      const ocrConfirmView = document.getElementById('ocrConfirmation');
+      if (ocrConfirmView) ocrConfirmView.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 200);
+
+  } catch (err) {
+    if (btn) {
+      btn.disabled = false;
+      btn.className = "btn btn-indigo w-100 py-3 fw-bold mb-4 shadow-sm";
+      if (btnText) btnText.innerText = 'Verify & Scan Document Now';
+    }
+    if (spinner) spinner.classList.add('d-none');
+    updateScanButtonState();
+    showNotification("Scan Failed", err.message || "Could not read ID details. Please try with clearer photos.", "error");
+  }
+};
+
+
+/**
+ * Server-side function to check if an ID is already registered under a different mobile number.
+ */
+async function checkIdMobileAssociation(extractedId, currentMobile) {
+  // Clean inputs
+  const searchId = String(extractedId || '').replace(/[\s-]/g, '').toUpperCase();
+  const searchMobile = String(currentMobile || '').replace(/[\s-+\d]{0,2}/, '').trim();
+
+  // 1. Skip if ID is empty or redacted to avoid false positives
+  if (!searchId || searchId.includes("REDACTED") || searchId === "") {
+    return { conflict: false };
+  }
+
+  try {
+    // 2. Query your database for an existing guest with this ID
+    const guestsRef = collection(db, "guests");
+    const q = query(guestsRef, where("verification.idNo", "==", searchId));
+    const querySnapshot = await getDocs(q);
+
+    if (!querySnapshot.empty) {
+      const existingGuest = querySnapshot.docs[0].data();
+      const existingMobile = String(existingGuest.guestDetails?.phone || '').replace(/[\s-+\d]{0,2}/, '').trim();
+
+      // 3. Flag conflict if mobile numbers don't match
+      if (existingMobile !== searchMobile && searchMobile !== "") {
+        return {
+          conflict: true,
+          existingName: existingGuest.guestDetails?.name,
+          existingMobile: existingGuest.guestDetails?.phone
+        };
+      }
+    }
+
+    return { conflict: false };
+  } catch (error) {
+    console.error("Conflict check error:", error);
+    return { conflict: false };
+  }
+}
+
+/**
+ * Sends Base64 images to Google Cloud Vision API endpoint or handles browser extraction
+ */
+async function extractTextFromImage(base64Data) {
+  // Strip Base64 header string if included
+  const cleanBase64 = base64Data.replace(/^data:image\/(png|jpeg|jpg);base64,/, "");
+
+  try {
+    const response = await fetch('https://ocr-proxy-547333535578.asia-south1.run.app', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: cleanBase64 })
+    });
+
+    if (!response.ok) {
+      throw new Error(`OCR Processing error from server: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return data.text || "";
+  } catch (error) {
+    console.error("Failed to extract text from image:", error);
+    return "";
+  }
+}
+/**
+ * Main OCR Orchestrator Flow
+ */
+async function executeOcrFlow(frontBase64, backBase64, idType, nationality) {
+  try {
+    const frontText = frontBase64 ? await extractTextFromImage(frontBase64) : "";
+    const backText = backBase64 ? await extractTextFromImage(backBase64) : "";
+
+    const combinedRawText = `${frontText}\n${backText}`.trim();
+
+    // If combined text is empty (during testing/mock), return empty schema cleanly
+    if (!combinedRawText) {
+      return { name: "", idNumber: "", address: "", raw: "" };
+    }
+
+    const upperText = combinedRawText.toUpperCase();
+    const idKeywords = ["GOVERNMENT", "INDIA", "INCOME TAX", "ELECTION", "DRIVING", "LICENSE", "ID", "CARD", "UNIQUE", "PASSPORT", "REPUBLIC"];
+    const hasIdKeywords = idKeywords.some(keyword => upperText.includes(keyword));
+
+    if (!hasIdKeywords) {
+      throw new Error("This doesn't look like a valid Government ID. Please upload clear photos.");
+    }
+
+    switch (idType) {
+      case "Aadhaar":
+        return parseAadhaarData(combinedRawText);
+      case "VoterID":
+        return parseVoterIDData(combinedRawText);
+      case "DL":
+        return parseDrivingLicenseData(combinedRawText);
+      case "Passport":
+        return parsePassportData(combinedRawText);
+      default:
+        throw new Error("Unsupported ID type selected.");
+    }
+  } catch (e) {
+    console.error("OCR Flow Error: " + e.message);
+    throw e;
+  }
+}
+
+/* ==========================================================================
+   DOCUMENT PARSERS
+   ========================================================================== */
+
+function parseAadhaarData(rawText) {
+  const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 1);
+  const standardizedText = rawText.replace(/[x*×K]/g, 'X');
+
+  const idRegex = /(\b[X\d]{4}\s[X\d]{4}\s\d{4}\b)|(\b\d{4}\b$)/gm;
+  const matches = standardizedText.match(idRegex) || [];
+  let idNumber = "";
+  let fallbackId = "";
+
+  const blacklisted = ["1947", "2021", "2022", "2023", "2024", "2025", "2026"];
+
+  for (let i = 0; i < matches.length; i++) {
+    let candidate = matches[i].trim();
+    let cleanDigits = candidate.replace(/\s/g, "");
+
+    if (cleanDigits.length === 12) {
+      const matchIndex = standardizedText.indexOf(candidate);
+      const contextBefore = standardizedText.substring(Math.max(0, matchIndex - 15), matchIndex).toUpperCase();
+
+      if (!contextBefore.includes("VID")) {
+        idNumber = candidate.toUpperCase();
+        break;
+      }
+    } else if (cleanDigits.length === 4 && !idNumber) {
+      const matchIndex = standardizedText.indexOf(candidate);
+      const contextBefore = standardizedText.substring(Math.max(0, matchIndex - 15), matchIndex).toUpperCase();
+
+      if (!blacklisted.includes(candidate) && !contextBefore.includes("VID")) {
+        fallbackId = "XXXX XXXX " + candidate;
+      }
+    }
+  }
+
+  idNumber = idNumber || fallbackId;
+
+  let detectedName = "Not found";
+  let detectedAddress = "Not found";
+  let capturingAddress = false;
+  let addressLines = [];
+
+  const noiseKeywords = [
+    "GOVERNMENT", "INDIA", "FATHER", "DOB", "MALE", "FEMALE",
+    "ENROLLMENT", "UNIQUE", "HELP", "YEAR", "VID", "INDA",
+    "WWW.", "HELP@", "ELITEBOOK", "LATITUDE", "THINKPAD", "MACBOOK", "HP", "DELL",
+    "AADHAAR", "NUMBER", "NO."
+  ];
+  const searchLimit = Math.floor(lines.length * 0.4);
+
+  for (let i = 0; i < lines.length; i++) {
+    let englishOnlyLine = lines[i].replace(/[^\x00-\x7F]/g, "").trim();
+    const upperLine = englishOnlyLine.toUpperCase();
+
+    if (detectedName === "Not found" && i < searchLimit) {
+      const isWatermarkGarbage = /(UIDAI|GOI|IDAI|OIG|G0I){2,}/.test(upperLine);
+      const isRelation = /S\/O|D\/O|W\/O|SON OF|DAUGHTER OF|WIFE OF/i.test(upperLine);
+      const isNoise = noiseKeywords.some(word => upperLine.includes(word));
+      const hasNumbers = /\d/.test(englishOnlyLine);
+      const hasVowels = /[AEIOUY]/.test(upperLine);
+      const isStructuralGarbage = /^[\/\s\\|:.\-]+/.test(englishOnlyLine);
+
+      if (englishOnlyLine.length > 3 && !isRelation && !isNoise && !hasNumbers && !isWatermarkGarbage && hasVowels && !isStructuralGarbage) {
+        let potentialName = englishOnlyLine.replace(/^[:\s,-]+/, "").trim();
+
+        if (i + 1 < searchLimit) {
+          let nextLine = lines[i + 1].replace(/[^\x00-\x7F]/g, "").trim();
+          const nextUpper = nextLine.toUpperCase();
+          const nextIsNoise = noiseKeywords.some(word => nextUpper.includes(word));
+          const nextIsStructural = /^[\/\s\\|:.\-]+/.test(nextLine);
+
+          if (nextLine.length > 0 && nextLine.length < 15 && !nextIsNoise && !/\d/.test(nextLine) && !/S\/O|D\/O|W\/O/i.test(nextUpper) && !nextIsStructural) {
+            potentialName += " " + nextLine;
+            i++;
+          }
+        }
+        detectedName = potentialName;
+      }
+    }
+
+    const isAddressLabel = upperLine.includes("ADDRESS");
+    const isRelationTrigger = upperLine.includes("S/O") || upperLine.includes("D/O") || upperLine.includes("W/O");
+
+    if (isAddressLabel || isRelationTrigger) {
+      if (capturingAddress) { addressLines = []; }
+      capturingAddress = true;
+
+      let startText = englishOnlyLine.replace(/Address[:\s]*/i, "").trim();
+      startText = startText.replace(/^[:,\s\d]+/, "").trim();
+
+      if (startText.replace(/[^a-zA-Z]/g, "").length > 3) {
+        addressLines.push(startText);
+      }
+      continue;
+    }
+
+    if (capturingAddress) {
+      const isFooter = ["WWW.", "UNIQUE", "HELP", "1947", "UIDAI"].some(word => upperLine.includes(word));
+      const isIdRepeat = idNumber && englishOnlyLine.replace(/\s/g, '').includes(idNumber.replace(/\s/g, '').slice(-4));
+
+      if (isFooter || isIdRepeat) {
+        capturingAddress = false;
+      } else {
+        if (englishOnlyLine.replace(/[^a-zA-Z]/g, "").length > 3) {
+          addressLines.push(englishOnlyLine);
+        }
+      }
+    }
+  }
+
+  if (addressLines.length > 0) {
+    detectedAddress = addressLines.join(", ").replace(/,\s*,/g, ",").trim();
+    detectedAddress = detectedAddress.replace(/^(Address|S\/O|D\/O|W\/O)\s+\1/i, "$1");
+  }
+
+  return { name: detectedName, idNumber: idNumber || "", address: detectedAddress, raw: rawText };
+}
+
+function parseVoterIDData(rawText) {
+  const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 2);
+  const idMatch = rawText.match(/[A-Z]{3}\d{7}/i);
+
+  let detectedName = "Not found";
+  let detectedAddress = "Not found";
+
+  for (let i = 0; i < lines.length; i++) {
+    const upperLine = lines[i].toUpperCase();
+    if (upperLine.includes("ELECTOR'S NAME") || upperLine.includes("ELECTORS NAME") || upperLine.includes("NAME")) {
+      let namePart = lines[i].split(/[:|-]/).pop().trim();
+      if (namePart.length < 3 && i + 1 < lines.length) {
+        namePart = lines[i + 1].trim();
+      }
+      detectedName = namePart.replace(/[^\x00-\x7F]/g, "").trim();
+      if (detectedName.length > 3) break;
+    }
+  }
+
+  let capturingAddress = false;
+  let addressLines = [];
+  const stopKeywords = ["DATE", "PLACE", "ELECTORAL", "REGISTRATION", "OFFICER", "FACSIMILE", "CHANGE", "OBTAIN"];
+
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i];
+    let englishOnlyLine = line.replace(/[^\x00-\x7F]/g, "").trim();
+    const upperLine = englishOnlyLine.toUpperCase();
+
+    const isAddressStart = upperLine.includes("ADDRESS") || englishOnlyLine.startsWith("#") || /^\d{1,4}[/-]\d+/.test(englishOnlyLine);
+
+    if (isAddressStart && !capturingAddress) {
+      capturingAddress = true;
+      let startText = englishOnlyLine.replace(/Address[:\s]*/i, "").trim();
+      startText = startText.replace(/^[:,\s]+/, "").trim();
+
+      if (startText.length > 3) {
+        addressLines.push(startText);
+      }
+      continue;
+    }
+
+    if (capturingAddress) {
+      const shouldStop = stopKeywords.some(word => upperLine.includes(word)) || /\d{2}\/\d{2}\/\d{4}/.test(englishOnlyLine);
+
+      if (shouldStop) {
+        capturingAddress = false;
+        break;
+      } else {
+        if (englishOnlyLine.replace(/[^a-zA-Z]/g, "").length > 3) {
+          addressLines.push(englishOnlyLine);
+        }
+      }
+    }
+  }
+
+  if (addressLines.length > 0) {
+    detectedAddress = addressLines.join(", ").replace(/,\s*,/g, ",").trim();
+  }
+
+  return { name: detectedName, idNumber: idMatch ? idMatch[0].toUpperCase() : "", address: detectedAddress, raw: rawText };
+}
+
+function parseDrivingLicenseData(combinedText) {
+  const lines = combinedText.split('\n').map(l => l.trim()).filter(l => l.length > 1);
+
+  const dlPattern = /([A-Z]{2}\d{2})[\s\-]?(\d{4})[\s\-]?(\d{5,7})/i;
+  const dlMatch = combinedText.match(dlPattern);
+  let idNumber = dlMatch ? (dlMatch[1] + " " + dlMatch[2] + " " + dlMatch[3]).toUpperCase() : "";
+
+  let detectedName = "Not found";
+  let detectedAddress = "Not found";
+  let capturingAddress = false;
+  let addressLines = [];
+
+  const noiseKeywords = ["TRANSPORT", "DATE", "BIRTH", "D.O.B", "ISSUE", "EXPIRY", "VALID", "ADDRESS", "S/O", "D/O", "W/O", "FATHER", "HUSBAND", "COV", "DOI", "INDIA", "CARD"];
+  const stopKeywords = ["VALID", "TILL", "SIGN", "DOI", "COV", "AUTHORITY", "BLOOD", "B.G"];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const upperLine = line.toUpperCase();
+    const cleanLine = line.replace(/[^\x00-\x7F]/g, "").trim();
+
+    if (detectedName === "Not found") {
+      const isNameLine = /N[A-Z0-4\s]{2,3}E|HOLDER/i.test(upperLine);
+      if (isNameLine) {
+        let potentialName = line.includes(":") ? line.split(":").pop().trim() : "";
+
+        let searchOffset = 1;
+        while (potentialName.length < 3 && searchOffset <= 3 && (i + searchOffset) < lines.length) {
+          const candidate = lines[i + searchOffset].trim();
+          const isDate = /\d{2}[\/\-]\d{2}[\/\-]\d{4}/.test(candidate);
+          const isNoise = noiseKeywords.some(word => candidate.toUpperCase().includes(word));
+          const hasNumbers = /\d/.test(candidate);
+
+          if (candidate.length > 3 && !isDate && !isNoise && !hasNumbers) {
+            potentialName = candidate;
+          }
+          searchOffset++;
+        }
+        const cleanNameResult = potentialName.replace(/[^\x00-\x7F]/g, "").replace(/^[:\s\-]+/, "").trim();
+        if (cleanNameResult.length > 3) detectedName = cleanNameResult.toUpperCase();
+      }
+    }
+
+    if (upperLine.includes("ADDRESS")) {
+      capturingAddress = true;
+      let startText = cleanLine.split(/[:|-]/).pop().trim();
+
+      if (startText.toUpperCase() === "ADDRESS" || startText.length < 2) {
+        continue;
+      }
+      addressLines.push(startText);
+      continue;
+    }
+
+    if (capturingAddress) {
+      const shouldStop = stopKeywords.some(word => upperLine.includes(word)) || /\d{2}[\/\-]\d{2}[\/\-]\d{4}/.test(cleanLine);
+
+      if (shouldStop) {
+        capturingAddress = false;
+      } else {
+        const isNoise = noiseKeywords.some(word => upperLine.includes(word) && word !== "ADDRESS");
+        if (!isNoise && cleanLine.length > 2) {
+          addressLines.push(cleanLine);
+        }
+      }
+    }
+  }
+
+  if (addressLines.length > 0) {
+    detectedAddress = addressLines.join(", ").replace(/[:]/g, "").replace(/,\s*,/g, ",").trim();
+  }
+
+  return { name: detectedName, idNumber: idNumber, address: detectedAddress, raw: combinedText };
+}
+
+function parsePassportData(rawText) {
+  const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 1);
+  const idMatch = rawText.match(/[A-Z]\d{7}/i);
+
+  let surname = "";
+  let givenName = "";
+  let detectedAddress = "Not found";
+  let capturingAddress = false;
+  let addressLines = [];
+
+  const headers = ["SURNAME", "GIVEN NAME", "NAME", "दिया गया नाम", "उपनाम"];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const upperLine = line.toUpperCase();
+
+    if (upperLine.includes("SURNAME") || upperLine.includes("उपनाम")) {
+      let val = line.split(/[:/|-]/).pop().trim();
+      if (val.length < 3 && i + 1 < lines.length) val = lines[i + 1].trim();
+      if (!headers.some(h => val.toUpperCase().includes(h))) {
+        surname = val.replace(/[^\x00-\x7F]/g, "").trim();
+      }
+    }
+
+    if (upperLine.includes("GIVEN NAME") || upperLine.includes("दिया गया नाम")) {
+      let val = line.split(/[:/|-]/).pop().trim();
+      if (val.length < 3 && i + 1 < lines.length) val = lines[i + 1].trim();
+      if (!headers.some(h => val.toUpperCase().includes(h))) {
+        givenName = val.replace(/[^\x00-\x7F]/g, "").trim();
+      }
+    }
+
+    if (upperLine.includes("ADDRESS") || upperLine.includes("पता")) {
+      capturingAddress = true;
+      let startText = line.split(/[:/|-]/).pop().trim();
+      if (startText.toUpperCase() !== "ADDRESS" && startText.length > 2) {
+        addressLines.push(startText);
+      }
+      continue;
+    }
+
+    if (capturingAddress) {
+      const isStopWord = ["PIN:", "FILE NO", "PHTO", "OLD PASSPORT", "DATE"].some(word => upperLine.includes(word));
+      const isDate = /\d{2}\/\d{2}\/\d{4}/.test(line);
+      let englishOnlyLine = line.replace(/[^\x00-\x7F]/g, "").trim();
+
+      if (isStopWord || isDate) {
+        capturingAddress = false;
+      } else {
+        const cleanedLine = englishOnlyLine.replace(/^[^a-zA-Z0-9#]+/, "").trim();
+        const letterCount = (cleanedLine.match(/[a-zA-Z0-9]/g) || []).length;
+        const totalCount = cleanedLine.length;
+
+        if (letterCount > 5 && (letterCount / totalCount) > 0.5) {
+          addressLines.push(cleanedLine);
+        }
+      }
+    }
+  }
+
+  let fullName = (givenName + " " + surname).trim();
+
+  if (!fullName || fullName.length < 5 || fullName.toUpperCase().includes("SURNAME")) {
+    const mrzLine = lines.find(l => l.startsWith("P<") || l.includes("<<"));
+    if (mrzLine) {
+      const cleanMRZ = mrzLine.replace(/^P.[A-Z]{3}/i, "").replace(/^P</i, "");
+      const parts = cleanMRZ.split("<<");
+      if (parts.length >= 2) {
+        const mrzSurname = parts[0].replace(/</g, " ").trim();
+        const mrzGiven = parts[1].replace(/</g, " ").trim();
+        const finalSurname = mrzSurname.replace(/^[P|I|N|D|K]{1,5}\s+/i, "").trim();
+        fullName = (mrzGiven + " " + finalSurname).trim();
+      }
+    }
+  }
+
+  if (addressLines.length > 0) {
+    detectedAddress = addressLines.join(", ").replace(/,\s*,/g, ",").trim();
+  }
+
+  return { name: fullName.toUpperCase() || "Not found", idNumber: idMatch ? idMatch[0].toUpperCase() : "", address: detectedAddress, raw: rawText };
+}
+
+/**
+ * Mobile Search & Pre-population Handler
+ */
+window.handleMobileSearch = async function() {
+  const searchInput = document.getElementById('searchMobile');
+  const searchBtn = document.getElementById('searchBtn');
+
+  if (!searchInput) {
+    console.error("❌ 'searchMobile' element not found in DOM.");
+    return;
+  }
+
+  const mobileInput = searchInput.value ? searchInput.value.trim().replace(/\D/g, '') : '';
+
+  console.log("🔍 [Search Started] Cleaned Mobile Input:", mobileInput);
+  if (typeof window.logToScreen === 'function') {
+    window.logToScreen('INFO', `Initiating search for mobile: ${mobileInput}`);
+  }
+
+  if (!mobileInput || mobileInput.length !== 10) {
+    console.warn("⚠️ [Search Cancelled] Invalid mobile number:", mobileInput);
+    if (typeof window.logToScreen === 'function') {
+      window.logToScreen('WARN', 'Search cancelled: Mobile number must be exactly 10 digits.');
+    }
+
+    // Clear input and refocus as requested
+    searchInput.value = '';
+    searchInput.focus();
+
+    if (typeof showNotification === 'function') {
+      showNotification("Invalid Mobile", "Please enter a valid 10-digit mobile number.", false);
+    } else {
+      alert("Please enter a valid 10-digit mobile number.");
+    }
+    return;
+  }
+
+  if (searchBtn) {
+    searchBtn.disabled = true;
+    searchBtn.innerText = "Searching...";
+  }
+
+  try {
+    console.log("📡 [Firestore Query] Querying 'guests' collection where guestDetails.phone ==", mobileInput);
+    const guestsRef = collection(db, "guests");
+    const q = query(guestsRef, where("guestDetails.phone", "==", mobileInput));
+    const querySnapshot = await getDocs(q);
+
+    console.log(`📊 [Firestore Result] Documents found: ${querySnapshot.size}`);
+    if (typeof window.logToScreen === 'function') {
+      window.logToScreen('INFO', `Query executed. Found ${querySnapshot.size} record(s) matching ${mobileInput}`);
+    }
+
+    const whatsappEl = document.getElementById('whatsapp');
+    if (whatsappEl) whatsappEl.value = mobileInput;
+
+    if (!querySnapshot.empty) {
+      // Record found in Firestore
+      const docSnapshot = querySnapshot.docs[0];
+      const docData = docSnapshot.data();
+
+      console.log("✅ [Record Found] Document ID:", docSnapshot.id);
+
+      const isExistingEl = document.getElementById('isExistingGuest');
+      const rowNumEl = document.getElementById('rowNumber');
+      if (isExistingEl) isExistingEl.value = "true";
+      if (rowNumEl) rowNumEl.value = docSnapshot.id;
+
+      // Populate UI fields
+      const guestName = docData.guestDetails?.name || '';
+      const idNo = docData.verification?.idNo || '';
+
+      const nameEl = document.getElementById('name');
+      const idNumEl = document.getElementById('idNumber');
+      if (nameEl) nameEl.value = guestName;
+      if (idNumEl) idNumEl.value = idNo;
+
+      if (docData.emergencyContact) {
+        const emName = document.getElementById('emergencyName');
+        const emPhone = document.getElementById('emergencyPhone');
+        if (emName) emName.value = docData.emergencyContact.name || '';
+        if (emPhone) emPhone.value = docData.emergencyContact.phone || '';
+      }
+
+      if (docData.travelDetails) {
+        const cityEl = document.getElementById('city');
+        const purposeEl = document.getElementById('purpose');
+        if (cityEl) cityEl.value = docData.travelDetails.arrivingCity || '';
+        if (purposeEl) purposeEl.value = docData.travelDetails.purpose || '';
+      }
+
+      // UI state toggles for existing user
+      const welcomeMsg = document.getElementById('welcomeMsg');
+      const idUploadSec = document.getElementById('idUploadSection');
+      const ocrConfirm = document.getElementById('ocrConfirmation');
+
+      if (welcomeMsg) welcomeMsg.classList.remove('d-none');
+      if (idUploadSec) idUploadSec.classList.add('d-none');
+      if (ocrConfirm) ocrConfirm.classList.remove('d-none');
+
+      if (typeof toggleSecondarySections === 'function') toggleSecondarySections(true);
+
+      if (typeof window.logToScreen === 'function') {
+        window.logToScreen('INFO', `Pre-populated existing record for ${guestName} (${docSnapshot.id})`);
+      }
+    } else {
+      // New User - Open Upload Sections
+      console.log("ℹ️ [No Record Found] Opening ID Upload UI.");
+
+      const isExistingEl = document.getElementById('isExistingGuest');
+      const welcomeMsg = document.getElementById('welcomeMsg');
+      const ocrConfirm = document.getElementById('ocrConfirmation');
+      const idUploadSec = document.getElementById('idUploadSection');
+
+      if (isExistingEl) isExistingEl.value = "false";
+      if (welcomeMsg) welcomeMsg.classList.add('d-none');
+      if (ocrConfirm) ocrConfirm.classList.add('d-none');
+      if (idUploadSec) idUploadSec.classList.remove('d-none');
+
+      if (typeof toggleSecondarySections === 'function') toggleSecondarySections(false);
+      updateScanButtonState();
+    }
+  } catch (error) {
+    console.error("❌ [Firestore Lookup Error]:", error);
+    if (typeof window.logToScreen === 'function') {
+      window.logToScreen('ERROR', `Lookup failed for ${mobileInput}`, `${error.code || 'Error'}: ${error.message}`);
+    }
+    if (typeof showNotification === 'function') {
+      showNotification("Error", "Could not fetch details: " + error.message, "error");
+    }
+  } finally {
+    if (searchBtn) {
+      searchBtn.disabled = false;
+      searchBtn.innerText = "Search";
+    }
+    console.log("🔚 [Search Completed] UI state restored.");
+  }
+};
+
+
+
+// --- 4. FORM DISPLAY SECTIONS ---
+window.toggleSecondarySections = function(checked) {
+  const secEmergency = document.getElementById('sec_emergency');
+  const secTravel = document.getElementById('sec_travel');
+  const secSelfie = document.getElementById('sec_selfie');
+  const secTerms = document.getElementById('sec_terms');
+  const submitContainer = document.getElementById('submitContainer');
+
+  if (checked) {
+    secEmergency.classList.remove('d-none');
+    secTravel.classList.remove('d-none');
+    secSelfie.classList.remove('d-none');
+    secTerms.classList.remove('d-none');
+    submitContainer.classList.remove('d-none');
+  } else {
+    secEmergency.classList.add('d-none');
+    secTravel.classList.add('d-none');
+    secSelfie.classList.add('d-none');
+    secTerms.classList.add('d-none');
+    submitContainer.classList.add('d-none');
+  }
+};
+
+window.validateFormCompletion = function() {
+  const accepted = document.getElementById('termsAccepted').checked;
+  const submitBtn = document.getElementById('submitBtn');
+  const warningMsg = document.getElementById('submitWarningMessage');
+
+  if (accepted) {
+    submitBtn.disabled = false;
+    submitBtn.classList.remove('opacity-50');
+    warningMsg.classList.add('d-none');
+  } else {
+    submitBtn.disabled = true;
+    submitBtn.classList.add('opacity-50');
+    warningMsg.classList.remove('d-none');
+  }
+};
+
+// Global camera stream holder
+let activeCameraStream = null;
+
+/**
+ * Attaches global cleanup listeners for keyboard Escape and window unload.
+ */
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') stopDesktopCamera();
+});
+
+window.addEventListener('beforeunload', () => {
+  stopDesktopCamera();
+});
+
+/**
+ * Opens the desktop webcam stream with fallback constraints.
+ */
+async function openDesktopCamera(targetInputId) {
+  // 1. Mobile Check
+  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+  if (isMobile) {
+    document.getElementById(targetInputId)?.click();
+    return;
+  }
+
+  let stream = null;
+
+  // 2. Constraint attempts (Progressive relaxation)
+  const constraintOptions = [
+    { video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' } },
+    { video: { facingMode: 'user' } },
+    { video: true } // Broadest fallback for integrated cameras with strict drivers
+  ];
+
+  for (const constraints of constraintOptions) {
+    try {
+      console.log("Attempting camera constraints:", constraints);
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
+      if (stream) break; // Successfully acquired stream
+    } catch (err) {
+      console.warn("Constraint attempt failed:", err.name, err.message);
+    }
+  }
+
+  // 3. Fallback to file picker if camera devices are unavailable or permission denied
+  if (!stream) {
+    alert("Unable to access your laptop's camera. Opening file upload selector instead.");
+    const fileInput = document.getElementById(targetInputId);
+    if (fileInput) fileInput.click();
+    return;
+  }
+
+  // 4. Modal Setup
+  activeCameraStream = stream;
+
+  let modal = document.getElementById('webcamModal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'webcamModal';
+    modal.style = "position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.85);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;";
+    modal.innerHTML = `
+      <video id="webcamVideo" autoplay playsinline style="max-width:90%;max-height:70vh;border-radius:12px;border:2px solid #fff;"></video>
+      <div class="mt-3">
+        <button type="button" id="captureWebcamBtn" class="btn btn-success me-2 px-4 py-2">Capture Photo</button>
+        <button type="button" id="closeWebcamBtn" class="btn btn-secondary px-4 py-2">Cancel</button>
+      </div>
+    `;
+    document.body.appendChild(modal);
+  } else {
+    modal.style.display = 'flex';
+  }
+
+  const videoEl = document.getElementById('webcamVideo');
+  videoEl.srcObject = stream;
+
+  // 5. Capture Photo Logic
+  document.getElementById('captureWebcamBtn').onclick = () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = videoEl.videoWidth || 1280;
+    canvas.height = videoEl.videoHeight || 720;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(videoEl, 0, 0);
+
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      const file = new File([blob], "desktop_capture.jpg", { type: "image/jpeg" });
+      const container = new DataTransfer();
+      container.items.add(file);
+
+      const fileInput = document.getElementById(targetInputId);
+      if (fileInput) {
+        fileInput.files = container.files;
+        fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+
+      stopDesktopCamera();
+    }, 'image/jpeg', 0.9);
+  };
+
+  document.getElementById('closeWebcamBtn').onclick = stopDesktopCamera;
+}
+
+function stopDesktopCamera() {
+  if (activeCameraStream) {
+    activeCameraStream.getTracks().forEach(track => track.stop());
+    activeCameraStream = null;
+  }
+  const modal = document.getElementById('webcamModal');
+  if (modal) modal.style.display = 'none';
+}
+
+// --- 5. CAMERA & SELFIE STREAM ---
+window.initiateSelfieProcess = async function() {
+  const video = document.getElementById('selfieStream');
+  const placeholder = document.getElementById('cameraPlaceholder');
+  const captureOverlay = document.getElementById('captureOverlay');
+  const selfieGuide = document.getElementById('selfieGuide');
+  const selfieStatus = document.getElementById('selfieStatus');
+
+  console.log("🎥 [Camera Init] Requesting camera stream...");
+  if (typeof window.logToScreen === 'function') {
+    window.logToScreen('INFO', 'Attempting to access device camera...');
+  }
+
+  // Progressive fallback constraints (Mobile Front Camera -> Standard HD -> Any Available Webcam)
+  const constraintOptions = [
+    { video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } } },
+    { video: { width: { ideal: 1280 }, height: { ideal: 720 } } },
+    { video: true }
+  ];
+
+  let stream = null;
+  let lastError = null;
+
+  for (const constraints of constraintOptions) {
+    try {
+      console.log("Attempting camera constraints:", constraints);
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
+      if (stream) break;
+    } catch (err) {
+      lastError = err;
+      console.warn("Constraint attempt failed:", err.name, err.message);
+    }
+  }
+
+  if (stream) {
+    console.log("✅ [Camera Active] Stream started successfully.");
+    currentStream = stream;
+    
+    video.srcObject = stream;
+    
+    // Crucial for Desktop: Force play stream once metadata loads
+    video.onloadedmetadata = async () => {
+      try {
+        await video.play();
+      } catch (playErr) {
+        console.error("Autoplay failed:", playErr);
+      }
+    };
+
+    if (video) video.classList.remove('d-none');
+    if (placeholder) placeholder.classList.add('d-none');
+    if (captureOverlay) captureOverlay.classList.remove('d-none');
+    if (selfieGuide) selfieGuide.classList.remove('d-none');
+    if (selfieStatus) selfieStatus.innerText = "Camera active. Tap capture button below.";
+  } else {
+    console.error("❌ [Camera Failed] Fallback options exhausted:", lastError);
+    if (typeof window.logToScreen === 'function') {
+      window.logToScreen('WARN', 'Camera streaming unavailable. Opening file input fallback.');
+    }
+
+    // Fall back to native file upload picker
+    const selfieInput = document.getElementById('selfieInput');
+    if (selfieInput) selfieInput.click();
+  }
+};
+
+window.takeSnapshot = function() {
+  const video = document.getElementById('selfieStream');
+  const canvas = document.getElementById('selfieCanvas');
+  
+  if (!video || !canvas) return;
+  const context = canvas.getContext('2d');
+
+  // 1. Cap maximum resolution (1280px max edge) to prevent huge Base64 strings from 4K/HD webcams
+  const maxDimension = 1280;
+  let width = video.videoWidth || 640;
+  let height = video.videoHeight || 480;
+
+  if (width > maxDimension || height > maxDimension) {
+    if (width > height) {
+      height = Math.round((height * maxDimension) / width);
+      width = maxDimension;
+    } else {
+      width = Math.round((width * maxDimension) / height);
+      height = maxDimension;
+    }
+  }
+
+  canvas.width = width;
+  canvas.height = height;
+
+  // 2. Clear canvas and draw captured camera frame
+  context.clearRect(0, 0, width, height);
+  context.drawImage(video, 0, 0, width, height);
+
+  // 3. Compress to JPEG with 75% quality (~150KB size max, safely below 1MB Firestore limit)
+  selfieDataBase64 = canvas.toDataURL('image/jpeg', 0.75);
+
+  // 4. Update UI toggles
+  canvas.classList.remove('d-none');
+  video.classList.add('d-none');
+
+  const captureOverlay = document.getElementById('captureOverlay');
+  const selfieGuide = document.getElementById('selfieGuide');
+  const retakeBtn = document.getElementById('retakeBtn');
+  const selfieStatus = document.getElementById('selfieStatus');
+
+  if (captureOverlay) captureOverlay.classList.add('d-none');
+  if (selfieGuide) selfieGuide.classList.add('d-none');
+  if (retakeBtn) retakeBtn.classList.remove('d-none');
+  if (selfieStatus) selfieStatus.innerText = "Selfie captured successfully!";
+
+  // 5. Stop camera tracks once captured to release hardware lock
+  if (window.currentStream) {
+    window.currentStream.getTracks().forEach(track => track.stop());
+    window.currentStream = null;
+  }
+};
+
+window.restartCamera = function() {
+  const canvas = document.getElementById('selfieCanvas');
+  const retakeBtn = document.getElementById('retakeBtn');
+  const selfieStatus = document.getElementById('selfieStatus');
+
+  if (canvas) canvas.classList.add('d-none');
+  if (retakeBtn) retakeBtn.classList.add('d-none');
+  if (selfieStatus) selfieStatus.innerText = "Camera ready";
+  
+  selfieDataBase64 = null;
+  window.initiateSelfieProcess();
+};
+
+window.handleFallbackSelfie = async function(input) {
+  if (input.files && input.files[0]) {
+    const file = input.files[0];
+
+    try {
+      // 1. Compress the file to a lightweight Base64 string to prevent Firestore size limit errors
+      selfieDataBase64 = await convertAndCompressToBase64(file);
+
+      // 2. Render preview image
+      const placeholder = document.getElementById('cameraPlaceholder');
+      if (placeholder) {
+        placeholder.innerHTML = `<img src="${selfieDataBase64}" class="w-100 h-100" style="object-fit: cover; border-radius: 8px;">`;
+        placeholder.classList.remove('d-none');
+      }
+
+      // 3. Update status text
+      const selfieStatus = document.getElementById('selfieStatus');
+      if (selfieStatus) {
+        selfieStatus.innerText = "Selfie uploaded!";
+      }
+    } catch (err) {
+      console.error("Selfie processing error:", err);
+      if (typeof showNotification === 'function') {
+        showNotification("Upload Error", "Failed to compress selfie image. Please try again.", "error");
+      }
+    }
+  }
+};
+
+/**
+ * Core Asset Engine: Uploads Blob to Firebase Storage
+ * Replicates Apps Script 'uploadToDrive' logic
+ */
+async function uploadAsset(base64Data, phone, idType, side = "") {
+  if (!base64Data) return "";
+  
+  const currentYear = new Date().getFullYear();
+  const folderPath = `identity_proofs/QID-${currentYear}`;
+  
+  // Format filename: YYYY-MM-DD-phone-type-side.jpg
+  const now = new Date();
+  const formattedDate = now.toISOString().split('T')[0];
+  const fileName = side 
+    ? `${formattedDate}-${phone}-${idType}-${side}.jpg`
+    : `${formattedDate}-${phone}-${idType}.jpg`;
+
+  const storageRef = ref(storage, `${folderPath}/${fileName}`);
+  const blob = dataURLToBlob(base64Data);
+  
+  const snapshot = await uploadBytes(storageRef, blob);
+  return await getDownloadURL(snapshot.ref);
+}
+
+// --- 6. FINAL FORM SUBMISSION ---
+window.finalSubmit = async function() {
+  const submitBtn = document.getElementById('submitBtn');
+
+  // Validation for 10-digit mobile numbers
+  const whatsappEl = document.getElementById('whatsapp');
+  const emergencyPhoneEl = document.getElementById('emergencyPhone');
+
+  const phone = whatsappEl ? whatsappEl.value.trim().replace(/\D/g, '') : '';
+  const emergencyPhone = emergencyPhoneEl ? emergencyPhoneEl.value.trim().replace(/\D/g, '') : '';
+
+  if (phone.length !== 10) {
+    showNotification("Invalid Phone", "The guest mobile number (WhatsApp) must be exactly 10 digits.", false);
+    if (whatsappEl) { 
+      whatsappEl.value = ''; 
+      whatsappEl.focus(); 
+    }
+    return;
+  }
+
+  if (emergencyPhone.length !== 10) {
+    showNotification("Invalid Emergency Phone", "The emergency contact number must be exactly 10 digits.", false);
+    if (emergencyPhoneEl) { 
+      emergencyPhoneEl.value = ''; 
+      emergencyPhoneEl.focus(); 
+    }
+    return;
+  }
+
+  submitBtn.disabled = true;
+  submitBtn.innerHTML = `<span class="spinner-border spinner-border-sm me-2"></span>Submitting Check-in...`;
+
+  const isExisting = document.getElementById('isExistingGuest').value === "true";
+  const docId = document.getElementById('rowNumber').value;
+  const idType = document.getElementById('idType').value || 'Aadhaar';
+
+  // Safety check: Ensure new guests have captured all required images
+  if (!isExisting && (!frontImageBase64 || !backImageBase64 || !selfieDataBase64)) {
+    showNotification("Capture Required", "Please ensure both ID sides are scanned and your selfie is captured.", "warning");
+    submitBtn.disabled = false;
+    submitBtn.innerText = "Complete Check-in";
+    return;
+  }
+
+  try {
+    // 1. Upload Assets to Firebase Storage (Replaces Apps Script uploadToDrive)
+    // This removes the 1MB Firestore limit issue entirely.
+    const [idFrontUrl, idBackUrl, selfieUrl] = await Promise.all([
+      uploadAsset(frontImageBase64, phone, idType, "Front"),
+      uploadAsset(backImageBase64, phone, idType, "Back"),
+      uploadAsset(selfieDataBase64, phone, "Selfie")
+    ]);
+
+    const payload = {
+      guestDetails: {
+        name: (document.getElementById('name')?.value || "").trim(),
+        phone: phone
+      },
+      verification: {
+        idType: idType,
+        idNo: (document.getElementById('idNumber')?.value || "").trim(),
+        verified: document.getElementById('detailsVerified')?.checked || false,
+        // Newly uploaded ID URLs are now stored here
+        ...(idFrontUrl && { idFrontUrl }),
+        ...(idBackUrl && { idBackUrl })
+      },
+      emergencyContact: {
+        name: (document.getElementById('emergencyName')?.value || "").trim(),
+        phone: emergencyPhone
+      },
+      travelDetails: {
+        arrivingCity: document.getElementById('city').value.trim(),
+        purpose: document.getElementById('purpose').value
+      },
+      verifiedStatus: "Verified",
+      ...(selfieUrl && { selfieUrl }),
+      updatedAt: serverTimestamp()
+    };
+
+    if (isExisting && docId) {
+      // Use dot notation logic if you have other nested fields, 
+      // but for this flat verification object updateDoc(payload) is sufficient here.
+      await updateDoc(doc(db, "guests", docId), payload);
+    } else {
+      payload.createdAt = serverTimestamp();
+      await addDoc(collection(db, "guests"), payload);
+    }
+
+    showNotification(
+      "Check-in Complete!", 
+      "Welcome to Vinyasa Nilaya. Your digital check-in details have been verified and saved.",
+      true
+    );
+  } catch (error) {
+    console.error("Submission error:", error);
+    showNotification("Submission Failed", error.message);
+    submitBtn.disabled = false;
+    submitBtn.innerText = "Complete Check-in";
+  }
+};
+
+/**
+ * Helper Modal Notification
+ */
+function showNotification(title, message, reloadOnClose = false) {
+  const titleEl = document.getElementById('modalTitle');
+  const msgEl = document.getElementById('modalMessage');
+  const modalEl = document.getElementById('notificationModal');
+
+  if (titleEl) titleEl.innerText = title;
+  if (msgEl) msgEl.innerText = message;
+  
+  if (modalEl && typeof bootstrap !== 'undefined') {
+    const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+    if (reloadOnClose) {
+      modalEl.addEventListener('hidden.bs.modal', () => {
+        window.location.reload();
+      }, { once: true });
+    }
+    modal.show();
+  } else {
+    alert(`${title}: ${message}`);
+  }
+}
+
+let activeUploadTarget = 'front'; // Track whether user clicked front or back box
+
+window.openUploadOptions = function(side) {
+  activeUploadTarget = side;
+  const modalEl = document.getElementById('uploadChoiceModal');
+  const title = document.getElementById('uploadChoiceTitle');
+  title.innerText = `Upload ${side.toUpperCase()} Side ID`;
+  
+  const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+  modal.show();
+};
+
+window.triggerUploadSource = function(sourceType) {
+  // Hide choice modal
+  const modalEl = document.getElementById('uploadChoiceModal');
+  const modal = bootstrap.Modal.getInstance(modalEl);
+  if (modal) modal.hide();
+
+  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+  const inputId = activeUploadTarget === 'front' ? 'idFrontFile' : 'idBackFile';
+
+  if (sourceType === 'camera') {
+    if (isMobile) {
+      // On mobile, trigger native camera input
+      const cameraInputId = activeUploadTarget === 'front' ? 'idFrontCamera' : 'idBackCamera';
+      document.getElementById(cameraInputId)?.click();
+    } else {
+      // On desktop, open desktop camera modal for ID capture
+      openDesktopCamera(inputId);
+    }
+  } else {
+    // Standard file upload selection
+    document.getElementById(inputId)?.click();
+  }
+};
+
+// Call this function whenever either image is selected/uploaded
+function checkUploadStatus() {
+  const scanBtn = document.getElementById('scanBtn');
+  const scanBtnText = document.getElementById('scanBtnText');
+
+  // Check if both front and back images exist
+  if (frontImageBase64 && backImageBase64) {
+    scanBtn.removeAttribute('disabled'); // Enable button
+    scanBtnText.textContent = 'Verify & Scan Document Now';
+  } else {
+    scanBtn.setAttribute('disabled', 'true'); // Keep disabled
+    scanBtnText.textContent = 'Upload Both Sides First';
+  }
+}
+
+
+/**
+ * Updates Scan Button state based on file input selections
+ */
+function updateScanButtonState() {
+  const frontFile = document.getElementById('idFrontFile')?.files[0] || document.getElementById('idFrontCamera')?.files[0];
+  const backFile = document.getElementById('idBackFile')?.files[0] || document.getElementById('idBackCamera')?.files[0];
+
+  const btn = document.getElementById('scanBtn');
+  const btnText = document.getElementById('scanBtnText');
+
+  if (frontFile && backFile) {
+    if (btn) btn.disabled = false;
+    if (btnText) btnText.innerText = 'Verify & Scan Document Now';
+  } else {
+    if (btn) btn.disabled = true;
+    if (btnText) btnText.innerText = 'Upload Both Sides First';
+  }
+}
+
+/**
+ * Dynamic Govt ID Type Dropdown Manager
  */
 function updateIdOptions() {
-  const isIndian = document.getElementById('natIndian').checked;
+  const natIndianRadio = document.getElementById('natIndian');
+  const isIndian = natIndianRadio ? natIndianRadio.checked : true;
   const idSelect = document.getElementById('idType');
+  
   if (!idSelect) return;
   
+  // Clear existing options
   idSelect.innerHTML = '';
 
   if (isIndian) {
@@ -20,735 +1331,55 @@ function updateIdOptions() {
   } else {
     idSelect.options.add(new Option('Passport', 'Passport'));
   }
+
 }
 
 /**
- * Run on DOM Load initialization
+ * Consolidated Initializations & Event Binding
  */
 document.addEventListener('DOMContentLoaded', function() {
-  updateIdOptions();
-  // Force the master structural nodes into an initialized hidden state
-  toggleSecondarySections(false);
-});
-
-/*Handle preview */
-
-async function handlePreview(inputElement, previewContainerId) {
-  const container = document.getElementById(previewContainerId);
-  const file = inputElement.files[0];
-  
-  if (!file) {
-    if (typeof evaluateUploadStatus === "function") evaluateUploadStatus();
-    return;
+  // --- 1. SET DEFAULT NATIONALITY & POPULATE ID OPTIONS ---
+  const natIndianRadio = document.getElementById('natIndian');
+  if (natIndianRadio) {
+    natIndianRadio.checked = true;
   }
   
-  // 1. Show processing state instantly
-  container.innerHTML = `
-    <div class="d-flex flex-column align-items-center justify-content-center h-100 py-3">
-      <div class="spinner-border spinner-border-sm text-primary mb-1" role="status"></div>
-      <span class="small text-muted fw-semibold">Processing...</span>
-    </div>`;
-
-  // OPTIMIZATION: Use Object URL instead of FileReader DataURL to preserve mobile memory limits
-  const objectUrl = URL.createObjectURL(file);
-  
-  const img = new Image();
-  img.src = objectUrl;
-  
-  img.onload = function() {
-    // 2. Render optimized UI layout
-    container.innerHTML = `
-      <div style="position: relative; width: 100%; height: 100%;">
-        <img src="${objectUrl}" class="preview-image" style="width: 100%; height: 100%; object-fit: cover; border-radius: 12px;">
-        <div style="position: absolute; bottom: 0; left: 0; width: 100%; background: rgba(255,255,255,0.85); padding: 5px 0; z-index: 10;">
-          <p class="small text-success m-0 fw-bold text-center">
-            <i class="bi bi-check-circle-fill me-1"></i>ID Photo Ready ✓
-          </p>
-        </div>
-      </div>`;
-      
-    // FIX: Status matrix evaluation is now safely triggered AFTER the DOM updates
-    if (typeof evaluateUploadStatus === "function") {
-      evaluateUploadStatus();
-    }
-  };
-    
-  img.onerror = function() {
-    URL.revokeObjectURL(objectUrl);
-    if (typeof showPermissionError === "function") showPermissionError();
-  };
-}
-
-// Function to show the permission modal
-function showPermissionError() {
-  const modalLib = window.bootstrap || bootstrap;
-  if (typeof modalLib !== 'undefined') {
-    const pModal = new modalLib.Modal(document.getElementById('permissionModal'));
-    pModal.show();
-  } else {
-    alert("Camera Access Denied: Please check your browser's site settings (click the lock icon in the URL bar).");
+  if (typeof updateIdOptions === 'function') {
+    updateIdOptions();
   }
-}
 
-// Evaluate upload status
-function evaluateUploadStatus() {
-  const frontInput = document.getElementById('idFront');
-  const backInput = document.getElementById('idBack');
-  const scanBtn = document.getElementById('scanBtn');
-  const btnText = document.getElementById('scanBtnText');
+  const nationalityRadios = document.querySelectorAll('input[name="nationality"]');
+  nationalityRadios.forEach(radio => {
+    radio.addEventListener('change', updateIdOptions);
+  });
 
-  if (!scanBtn || !btnText) return;
-
-  const frontFile = frontInput && frontInput.files ? frontInput.files[0] : null;
-  const backFile = backInput && backInput.files ? backInput.files[0] : null;
-
-  if (frontFile && backFile) {
-    scanBtn.disabled = false;
-    scanBtn.style.opacity = "1";
-    btnText.innerText = "Verify & Scan Document Now";
-  } else {
-    scanBtn.disabled = true;
-    scanBtn.style.opacity = "0.5";
-    btnText.innerText = "Upload Both Sides First";
-  }
-}
-
-// Clean mobile number
-function cleanMobileNumber(rawNumber) {
-  if (rawNumber === undefined || rawNumber === null) return "";
-  let numStr = String(rawNumber).trim();
-  numStr = numStr.replace(/[\s-+]/g, '');
-  if (numStr.startsWith('91') && numStr.length > 10) {
-    numStr = numStr.substring(2);
-  }
-  return numStr;
-}
-
-/**
- * Function to handle mobile search pipeline
- */
-function handleMobileSearch() {
-  const rawMobile = document.getElementById('searchMobile').value;
-  const searchMobile = cleanMobileNumber(rawMobile);
+  // --- 2. SEARCH BUTTON & ENTER KEY BINDINGS ---
+  const searchMobileInput = document.getElementById('searchMobile');
   const searchBtn = document.getElementById('searchBtn');
-  const whatsappField = document.getElementById('whatsapp');
 
-  if (searchMobile.length < 10) {
-    showNotification(
-      "Invalid Number",
-      "Please enter a valid 10-digit mobile number to proceed with the search.",
-      "warning"
-    );
-    return;
-  }
-
-  searchBtn.disabled = true;
-  searchBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Searching...';
-
-  if (whatsappField) whatsappField.value = searchMobile;
-
-  google.script.run
-    .withSuccessHandler(function(guest) {
-      const sInput = document.getElementById('searchMobile');
-      const sBtn = document.getElementById('searchBtn');
-      const idUploadSection = document.getElementById('idUploadSection');
-      const ocrConfirmation = document.getElementById('ocrConfirmation');
-      const welcomeMsg = document.getElementById('welcomeMsg');
-
-      if (guest.exists) {
-        sBtn.innerHTML = 'Search';
-        sBtn.disabled = true;
-        if (sInput) sInput.readOnly = true;
-
-        document.getElementById('isExistingGuest').value = "true";
-        document.getElementById('rowNumber').value = guest.rowNumber;
-
-        if (idUploadSection) idUploadSection.classList.add('d-none');
-        if (ocrConfirmation) ocrConfirmation.classList.remove('d-none');
-        if (welcomeMsg) welcomeMsg.classList.remove('d-none');
-        
-        document.getElementById('name').value = guest.name || "";
-        document.getElementById('idType').value = guest.idType || "Aadhaar";
-        document.getElementById('idNumber').value = guest.idNumber || "";
-        document.getElementById('emergencyName').value = guest.emergencyName || "";
-        document.getElementById('emergencyPhone').value = cleanMobileNumber(guest.emergencyPhone || "");
-        document.getElementById('city').value = guest.city || "";
-        
-        if (document.getElementById('address') && guest.address) {
-          document.getElementById('address').value = guest.address;
+  if (searchMobileInput) {
+    searchMobileInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') {
+        e.preventDefault(); // Stop form submission / page reload
+        console.log("⌨️ Enter key pressed in searchMobile. Executing handleMobileSearch...");
+        if (typeof window.handleMobileSearch === 'function') {
+          window.handleMobileSearch();
         }
-
-        // Force fresh explicit check verification for returning workflow
-        const verifiedCheckbox = document.getElementById('detailsVerified');
-        if (verifiedCheckbox) verifiedCheckbox.checked = false;
-
-        // FIX: Smooth transition down to the verified data card for existing guests
-        setTimeout(() => {
-          if (ocrConfirmation) {
-            ocrConfirmation.scrollIntoView({ behavior: 'smooth', block: 'start' });
-          }
-        }, 150);
-
-      } else {
-        document.getElementById('isExistingGuest').value = "false";
-        document.getElementById('rowNumber').value = "";
-
-        if (sBtn) {
-          sBtn.disabled = false;
-          sBtn.innerHTML = 'Search';
-        }
-
-        if (idUploadSection) idUploadSection.classList.remove('d-none');
-        if (ocrConfirmation) ocrConfirmation.classList.add('d-none');
-        if (welcomeMsg) welcomeMsg.classList.add('d-none');
-
-        // FIX: Smooth transition down to the upload boxes for fresh workflows
-        setTimeout(() => {
-          if (idUploadSection) {
-            idUploadSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
-          }
-        }, 150);
       }
-
-      if (typeof showVerificationSection === "function") {
-        showVerificationSection();
-      }
-      
-      validateFormState();
-    })
-    .withFailureHandler(function(err) {
-      const sBtn = document.getElementById('searchBtn');
-      if (sBtn) {
-        sBtn.disabled = false;
-        sBtn.innerHTML = 'Search';
-      }
-      showNotification("Error", "System search failed. Please try again.", "error");
-    })
-    .searchGuestByMobile(searchMobile);
-}
-
-/**
- * CRITICAL ACTION HANDLER: Bypasses sections for existing records
- */
-function handleIdentityConfirmation() {
-  const isExisting = document.getElementById('isExistingGuest').value === "true";
-  const verifiedCheckbox = document.getElementById('detailsVerified');
-  
-  if (verifiedCheckbox) {
-    verifiedCheckbox.checked = true;
-  }
-
-  if (isExisting) {
-    // 1. Reveal hidden downstream layouts instantly so prefilled data is accessible
-    const secEmergency = document.getElementById('sec_emergency');
-    const secTravel = document.getElementById('sec_travel');
-    const secSelfie = document.getElementById('sec_selfie');
-    const secTerms = document.getElementById('sec_terms');
-    const submitContainer = document.getElementById('submitContainer');
-
-    if (secEmergency) secEmergency.classList.remove('d-none');
-    if (secTravel) secTravel.classList.remove('d-none');
-    if (secSelfie) secSelfie.classList.remove('d-none');
-    if (secTerms) secTerms.classList.remove('d-none');
-    if (submitContainer) submitContainer.classList.remove('d-none');
-
-    // 2. Validate Travel Details presence before choosing the scroll target
-    const cityVal = document.getElementById('city')?.value.trim() || "";
-    const purposeSelect = document.getElementById('purpose');
-    const purposeVal = purposeSelect ? purposeSelect.value : "";
-
-    // If travel data is missing, halt the express scroll at the Travel section
-    if (cityVal.length <= 1 || purposeVal === "") {
-      setTimeout(() => {
-        if (secTravel) {
-          secTravel.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        }
-      }, 100);
-      
-      // Refresh validation styles to highlight the empty inputs
-      validateFormState();
-      return;
-    }
-
-    // 3. Clear to proceed route: Snap UI display window straight down to camera section
-    setTimeout(() => {
-      if (secSelfie) {
-        secSelfie.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }
-    }, 100);
-
-    // 4. Trigger hardware video streams instantly
-    initiateSelfieProcess();
-
-  } else {
-    // Step-by-step incremental layout engine fallback logic for fresh check-ins
-    toggleSecondarySections(true);
-  }
-
-  validateFormState();
-}
-
-// Shared optimized compression engine for ID Front, ID Back, and File Fallbacks
-const convertAndCompressToBase64 = file => new Promise((resolve, reject) => {
-  if (!file) resolve(null);
-  
-  const img = new Image();
-  const objectUrl = URL.createObjectURL(file);
-  img.src = objectUrl;
-  
-  img.onload = function() {
-    const maxBoundary = 1600; // Flawless OCR text resolution, safe size payload
-    let width = img.width;
-    let height = img.height;
-    
-    if (width > maxBoundary || height > maxBoundary) {
-      if (width > height) {
-        height *= maxBoundary / width;
-        width = maxBoundary;
-      } else {
-        width *= maxBoundary / height;
-        height = maxBoundary;
-      }
-    }
-    
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext('2d');
-    
-    // Solid white backdrop to guard against alpha channel transparency inversion
-    ctx.fillStyle = "#FFFFFF";
-    ctx.fillRect(0, 0, width, height);
-    
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(img, 0, 0, width, height);
-    
-    const base64Result = canvas.toDataURL('image/jpeg', 0.85);
-    URL.revokeObjectURL(objectUrl);
-    resolve(base64Result);
-  };
-  
-  img.onerror = (err) => {
-    URL.revokeObjectURL(objectUrl);
-    reject(err);
-  };
-});
-
-/* Handle OCR Engine Scans */
-async function handleIdScan() {
-  const frontFile = document.getElementById('idFront').files[0];
-  const backFile = document.getElementById('idBack').files[0];
-  const currentMobile = cleanMobileNumber(document.getElementById('searchMobile').value);
-  
-  const nationality = document.querySelector('input[name="nationality"]:checked').value;
-  const idType = document.getElementById('idType').value;
-  
-  if (!frontFile || !backFile) return showNotification("Upload Required", "Please upload both Front and Back side images of your ID card.", "warning");
-  if (!currentMobile) return showNotification("Mobile Required", "Mobile number is required for registration matching.", "warning");
-
-  const btn = document.getElementById('scanBtn');
-  const spinner = document.getElementById('scanSpinner');
-  const btnText = document.getElementById('scanBtnText');
-  
-  if (btn) btn.disabled = true;
-  if (spinner) spinner.classList.remove('d-none');
-  if (btnText) btnText.innerText = 'Analyzing ' + idType ;
-
-  try {
-    // 1. Read and compress both images simultaneously using global shared engine
-    const [frontBase64, backBase64] = await Promise.all([
-      convertAndCompressToBase64(frontFile),
-      convertAndCompressToBase64(backFile)
-    ]);
-
-    google.script.run
-      .withSuccessHandler(function(res) {
-        google.script.run
-          .withSuccessHandler(function(checkRes) {
-            if (checkRes.conflict) {
-              if (btn) {
-                btn.disabled = false;
-                btn.className = "btn btn-primary w-100 py-3 fw-bold";
-                if (btnText) btnText.innerText = 'Verify & Scan Document Now';
-              }
-              
-              document.getElementById('name').value = "";
-              document.getElementById('idNumber').value = "";
-              document.getElementById('address').value = "";
-              
-              showNotification(
-                "Security Alert",
-                `This identification document is already recorded on another guest profile under the name "${checkRes.existingName}".`,
-                "error"
-              );
-              
-              resetImageUploads();
-              return;
-            }
-
-            const ocrConfirmEl = document.getElementById('ocrConfirmation');
-            if (ocrConfirmEl) ocrConfirmEl.classList.remove('d-none');
-            
-            document.getElementById('name').value = (res.name !== "Not found") ? res.name : "";
-            document.getElementById('idNumber').value = res.idNumber || "";
-            document.getElementById('address').value = res.address || "";
-
-            if (spinner) spinner.classList.add('d-none');
-            if (btn) {
-              btn.disabled = false;
-              btn.className = "btn btn-success w-100 mb-4 shadow-sm text-white";
-              if (btnText) btnText.innerText = 'Scan Complete ✓';
-            }
-            
-            validateFormState();
-            
-            setTimeout(() => {
-              const ocrConfirmView = document.getElementById('ocrConfirmation');
-              if (ocrConfirmView) ocrConfirmView.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            }, 200);
-          })
-          .checkIdMobileAssociation(res.idNumber, currentMobile);
-      })
-      .withFailureHandler(function(err) {
-        if (btn) {
-          btn.disabled = false;
-          btn.className = "btn w-100 py-3 fw-bold btn-primary";
-          if (btnText) btnText.innerText = 'Verify & Scan Document Now';
-        }
-        if (spinner) spinner.classList.add('d-none');
-        resetImageUploads();
-        showNotification("Scan Failed", "We couldn't extract distinct characters from your " + idType + ". Please attempt using crisp, bright photos.", "error");
-      })
-      .executeOcrFlow(frontBase64, backBase64, idType, nationality);
-
-  } catch (error) {
-    if (btn) {
-      btn.disabled = false;
-      if (btnText) btnText.innerText = 'Verify & Scan Document Now';
-    }
-    if (spinner) spinner.classList.add('d-none');
-    showNotification("Upload Error", "There was an error reading localized document structures.", "error");
-  }
-}
-
-/**
- * Progressive Node Visibility Controller
- */
-function toggleSecondarySections(isVerified) {
-  const secEmergency = document.getElementById('sec_emergency');
-  const checkedState = document.getElementById('detailsVerified').checked;
-  const isExisting = document.getElementById('isExistingGuest').value === "true";
-
-  if (isExisting) {
-    // Keep primary downstream panels visible for existing accounts
-    if (secEmergency) secEmergency.classList.remove('d-none');
-    document.getElementById('sec_travel')?.classList.remove('d-none');
-    
-    // Gate section 4 (selfie) based on whether travel details are completed
-    const cityVal = document.getElementById('city')?.value.trim() || "";
-    const purposeVal = document.getElementById('purpose')?.value || "";
-    
-    if (cityVal.length > 1 && purposeVal !== "") {
-      document.getElementById('sec_selfie')?.classList.remove('d-none');
-      document.getElementById('sec_terms')?.classList.remove('d-none');
-      document.getElementById('submitContainer')?.classList.remove('d-none');
-    } else {
-      document.getElementById('sec_selfie')?.classList.add('d-none');
-      document.getElementById('sec_terms')?.classList.add('d-none');
-      document.getElementById('submitContainer')?.classList.add('d-none');
-    }
-    return;
-  }
-
-  if (isVerified && checkedState) {
-    if (secEmergency) {
-      secEmergency.classList.remove('d-none');
-      setTimeout(() => {
-        secEmergency.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }, 150);
-    }
-  } else {
-    if (secEmergency) secEmergency.classList.add('d-none');
-    document.getElementById('sec_travel')?.classList.add('d-none');
-    document.getElementById('sec_selfie')?.classList.add('d-none');
-    document.getElementById('sec_terms')?.classList.add('d-none');
-    document.getElementById('submitContainer')?.classList.add('d-none');
-  }
-  validateFormState();
-}
-
-function checkEmergencyCompletion() {
-  const isExisting = document.getElementById('isExistingGuest').value === "true";
-  const secTravel = document.getElementById('sec_travel');
-  
-  if (isExisting) {
-    if (secTravel) secTravel.classList.remove('d-none');
-    return;
-  }
-  
-  const nameVal = document.getElementById('emergencyName').value.trim();
-  const phoneVal = document.getElementById('emergencyPhone').value.trim();
-
-  if (nameVal.length > 2 && phoneVal.length >= 10) {
-    if (secTravel && secTravel.classList.contains('d-none')) {
-      secTravel.classList.remove('d-none');
-      setTimeout(() => {
-        secTravel.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }, 150);
-    }
-  }
-  validateFormState();
-}
-
-function checkTravelCompletion() {
-  const isExisting = document.getElementById('isExistingGuest').value === "true";
-  const cityVal = document.getElementById('city').value.trim();
-  const purposeVal = document.getElementById('purpose').value;
-  const secSelfie = document.getElementById('sec_selfie');
-  const secTerms = document.getElementById('sec_terms');
-  const submitContainer = document.getElementById('submitContainer');
-
-  if (cityVal.length > 1 && purposeVal !== "") {
-    if (secSelfie && secSelfie.classList.contains('d-none')) {
-      secSelfie.classList.remove('d-none');
-      secTerms.classList.remove('d-none');
-      submitContainer.classList.remove('d-none');
-      
-      setTimeout(() => {
-        secSelfie.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }, 150);
-    }
-  } else {
-    // If data is deleted/cleared, hide downstream dependencies immediately
-    secSelfie?.classList.add('d-none');
-    secTerms?.classList.add('d-none');
-    submitContainer?.classList.add('d-none');
-  }
-  validateFormState();
-}
-
-/**
- * Phase 4: Dynamic Matrix System Validator
- */
-function validateFormState() {
-  const submitBtn = document.getElementById('submitBtn');
-  const warningMsg = document.getElementById('submitWarningMessage');
-  if (!submitBtn) return;
-  
-  const isExisting = document.getElementById('isExistingGuest').value === "true";
-  const hasName = document.getElementById('name').value.trim() !== "";
-  const hasId = document.getElementById('idNumber').value.trim() !== "";
-  const idVerified = document.getElementById('detailsVerified').checked;
-  
-  const purposeSelect = document.getElementById('purpose');
-  const hasPurpose = purposeSelect && purposeSelect.value !== "";
-  const hasCity = document.getElementById('city').value.trim() !== "";
-
-  const emergencyName = document.getElementById('emergencyName').value.trim() !== "";
-  const emergencyPhone = document.getElementById('emergencyPhone').value.trim().length >= 10;
-
-  const selfieCanvas = document.getElementById('selfieCanvas');
-  const selfieInput = document.getElementById('selfieInput');
-  let hasSelfie = false;
-  
-  if (selfieCanvas && selfieCanvas.width > 0) {
-    const selfieData = selfieCanvas.toDataURL();
-    const blankCanvas = document.createElement('canvas');
-    blankCanvas.width = selfieCanvas.width;
-    blankCanvas.height = selfieCanvas.height;
-    hasSelfie = (selfieData !== blankCanvas.toDataURL());
-  }
-  
-  if (!hasSelfie && selfieInput && selfieInput.files && selfieInput.files.length > 0) {
-    hasSelfie = true;
-  }
-
-  const termsAccepted = document.getElementById('termsAccepted').checked;
-
-  let isFormValid = false;
-  if (isExisting) {
-    isFormValid = hasName && hasId && idVerified && hasPurpose && hasCity && hasSelfie && termsAccepted;
-  } else {
-    isFormValid = hasName && hasId && idVerified && emergencyName && emergencyPhone && hasCity && hasPurpose && hasSelfie && termsAccepted;
-  }
-
-  if (isFormValid) {
-    submitBtn.disabled = false;
-    submitBtn.classList.remove('opacity-50');
-    if (warningMsg) warningMsg.classList.add('d-none');
-  } else {
-    submitBtn.disabled = true;
-    submitBtn.classList.add('opacity-50');
-    
-    if (warningMsg) {
-      warningMsg.classList.remove('d-none');
-      if (!idVerified) {
-        warningMsg.innerHTML = '<i class="bi bi-person-check-fill me-2"></i>Please verify identity details.';
-      } else if (isExisting && (!hasCity || !hasPurpose)) {
-        warningMsg.innerHTML = '<i class="bi bi-airplane-fill me-2"></i>Travel tracking info missing.';
-      } else if (!isExisting && (!emergencyName || !emergencyPhone)) {
-        warningMsg.innerHTML = '<i class="bi bi-telephone-plus-fill me-2"></i>Emergency details required.';
-      } else if (!isExisting && (!hasCity || !hasPurpose)) {
-        warningMsg.innerHTML = '<i class="bi bi-airplane-fill me-2"></i>Travel tracking info missing.';
-      } else if (!hasSelfie) {
-        warningMsg.innerHTML = '<i class="bi bi-camera-fill me-2"></i>Verification selfie is missing.';
-      } else if (!termsAccepted) {
-        warningMsg.innerHTML = '<i class="bi bi-exclamation-triangle-fill me-2"></i>Please accept House Rules.';
-      } else {
-        warningMsg.innerHTML = '<i class="bi bi-info-circle-fill me-2"></i>Complete all sections to unlock button.';
-      }
-    }
-  }
-
-  // --- INTEGRATED SCROLL AUTOMATION FOR DOWNSTREAM ACTIONS ---
-  if (hasSelfie) {
-    const secTerms = document.getElementById('sec_terms');
-    const submitContainer = document.getElementById('submitContainer');
-    
-    // Force structural display activation
-    if (secTerms) secTerms.classList.remove('d-none');
-    if (submitContainer) submitContainer.classList.remove('d-none');
-
-    // Check the global single-fire semaphore flag
-    if (!window.hasAutoScrolledToTerms) {
-      window.hasAutoScrolledToTerms = true;
-      
-      setTimeout(() => {
-        if (secTerms) {
-          secTerms.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }
-      }, 350);
-    }
-  }
-}
-
-// Intercept data modification changes dynamically across the document environment
-document.addEventListener('change', function(e) {
-  if (e.target.id === 'emergencyName' || e.target.id === 'emergencyPhone') checkEmergencyCompletion();
-  if (e.target.id === 'city' || e.target.id === 'purpose') checkTravelCompletion();
-  validateFormState();
-});
-
-document.addEventListener('input', function(e) {
-  if (e.target.id === 'emergencyName' || e.target.id === 'emergencyPhone') checkEmergencyCompletion();
-  if (e.target.id === 'city' || e.target.id === 'purpose') checkTravelCompletion();
-  validateFormState();
-});
-
-/**
- * Camera and Live Video Selfie Processing Routines
- */
-async function initiateSelfieProcess() {
-  const video = document.getElementById('selfieStream');
-  const placeholder = document.getElementById('cameraPlaceholder');
-  const guide = document.getElementById('selfieGuide');
-  const overlay = document.getElementById('captureOverlay');
-  const status = document.getElementById('selfieStatus');
-  const container = document.getElementById('selfieContainer');
-  const canvas = document.getElementById('selfieCanvas');
-
-  if (!video || !video.classList.contains('d-none') || (canvas && !canvas.classList.contains('d-none'))) return;
-
-  status.innerText = "Accessing camera system devices...";
-
-  try {
-    const mediaStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "user" },
-      audio: false
     });
-    
-    stream = mediaStream;
-    video.srcObject = mediaStream;
-    
-    placeholder.classList.add('d-none');
-    video.classList.remove('d-none');
-    if (guide) guide.classList.remove('d-none');
-    if (overlay) overlay.classList.remove('d-none');
-    
-    status.innerHTML = '<span class="text-success fw-bold">● Live Feed Active</span>';
-    if (container) container.onclick = null;
-
-  } catch (err) {
-    console.warn("Hardware media streaming blocked or device missing:", err);
-    status.innerText = "Opening native system camera fallback capture...";
-    const fallbackInput = document.getElementById('selfieInput');
-    if (fallbackInput) fallbackInput.click();
-  }
-}
-
-function takeSnapshot() {
-  const video = document.getElementById('selfieStream');
-  const canvas = document.getElementById('selfieCanvas');
-  const guide = document.getElementById('selfieGuide');
-  const status = document.getElementById('selfieStatus');
-  const retakeBtn = document.getElementById('retakeBtn');
-  const overlay = document.getElementById('captureOverlay');
-
-  if (!video || video.videoWidth === 0) return;
-
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
-  const ctx = canvas.getContext('2d');
-  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-  canvas.classList.remove('d-none');
-  video.classList.add('d-none');
-  if (guide) guide.classList.add('d-none');
-  if (overlay) overlay.classList.add('d-none');
-  if (retakeBtn) retakeBtn.classList.remove('d-none');
-  
-  status.innerText = "Selfie captured successfully ✓";
-
-  if (stream) {
-    stream.getTracks().forEach(track => track.stop());
-    stream = null;
-  }
-  
-  validateFormState();
-}
-
-function restartCamera() {
-  const placeholder = document.getElementById('cameraPlaceholder');
-  const status = document.getElementById('selfieStatus');
-  const canvas = document.getElementById('selfieCanvas');
-  const retakeBtn = document.getElementById('retakeBtn');
-  const guide = document.getElementById('selfieGuide');
-  const video = document.getElementById('selfieStream');
-  const selfieInput = document.getElementById('selfieInput');
-
-  if (stream) {
-    stream.getTracks().forEach(track => track.stop());
-    stream = null;
   }
 
-  if (canvas) {
-    canvas.classList.add('d-none');
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    canvas.width = 0;
-    canvas.height = 0;
-  }
-  
-  if (selfieInput) selfieInput.value = "";
-  if (video) video.classList.add('d-none');
-  if (retakeBtn) retakeBtn.classList.add('d-none');
-  if (guide) guide.classList.add('d-none');
-
-  if (placeholder) {
-    placeholder.classList.remove('d-none');
-    placeholder.innerHTML = `
-      <div class="rounded-circle bg-primary bg-opacity-10 p-4 mb-3">
-        <i class="bi bi-camera-fill h1 text-primary mb-0"></i>
-      </div>
-      <span class="fw-bold">Tap to Take Verification Selfie</span>
-    `;
+  if (searchBtn) {
+    searchBtn.addEventListener('click', function(e) {
+      e.preventDefault();
+      console.log("🖱️ Search button clicked. Executing handleMobileSearch...");
+      if (typeof window.handleMobileSearch === 'function') {
+        window.handleMobileSearch();
+      }
+    });
   }
 
-  status.innerText = "Camera ready";
-  
-  const container = document.getElementById('selfieContainer');
-  if (container) container.onclick = initiateSelfieProcess;
-  
-  validateFormState();
-}
+  // --- 4. INITIAL STATE CHECKS ---
+  if (typeof updateScanButtonState === 'function') updateScanButtonState();
+  if (typeof toggleSecondarySections === 'function') toggleSecondarySections(false);
+});

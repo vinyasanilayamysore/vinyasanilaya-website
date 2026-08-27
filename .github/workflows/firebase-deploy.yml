@@ -1,4 +1,4 @@
-name: Deploy to Firebase Hosting on Push
+name: Deploy to Firebase Hosting and Rules on Push
 
 on:
   push:
@@ -11,6 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Deploys Hosting automatically
       - name: Deploy to Firebase Hosting
         uses: FirebaseExtended/action-hosting-deploy@v0
         with:
@@ -18,3 +19,13 @@ jobs:
           firebaseServiceAccount: '${{ secrets.FIREBASE_SERVICE_ACCOUNT_VINYASANILAYA_WEBSITE }}'
           channelId: live
           projectId: vinyasanilaya-website
+
+      # Authenticates for CLI tasks
+      - name: Authenticate for Rules
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: '${{ secrets.FIREBASE_SERVICE_ACCOUNT_VINYASANILAYA_WEBSITE }}'
+
+      # Deploys Firestore Rules
+      - name: Deploy Firestore Rules
+        run: npx firebase-tools deploy --only firestore:rules --project vinyasanilaya-website
