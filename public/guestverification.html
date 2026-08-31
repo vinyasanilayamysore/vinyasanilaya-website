@@ -1,52 +1,504 @@
-// js/storage.js
-import { 
-  ref, 
-  uploadBytes, 
-  getDownloadURL 
-} from "https://www.gstatic.com/firebasejs/10.8.0/firebase-storage.js";
+<!DOCTYPE html>
+<html lang="en">
 
-/**
- * Uploads a file directly to Firebase Storage
- * @param {Object} storage - The initialized Firebase Storage instance
- * @param {File|Blob} file - The file/blob object from input element or canvas
- * @param {string} folderPath - Path in bucket (e.g. 'ids/front')
- * @returns {Promise<string|null>} - Public download URL or null
- */
-export async function uploadFileToFirebase(storage, file, folderPath) {
-  if (!file || !storage) return null;
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vinyasa Nilaya - Digital Check-in</title>
   
-  const cleanName = file.name ? file.name.replace(/[^a-zA-Z0-9.]/g, "_") : "file.jpg";
-  const fileName = `${Date.now()}_${cleanName}`;
-  const fileRef = ref(storage, `${folderPath}/${fileName}`);
+  <!-- Inline SVG Favicon to eliminate 404 console error -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧘</text></svg>">
+  
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 
-  try {
-    const snapshot = await uploadBytes(fileRef, file);
-    return await getDownloadURL(snapshot.ref);
-  } catch (error) {
-    if (typeof window.logToScreen === 'function') {
-      window.logToScreen('ERROR', `Failed to upload file to ${folderPath}`, error.message);
+  <!-- External Stylesheet -->
+  <link rel="stylesheet" href="css/styles.css">
+
+  <style>
+    .id-guide-container {
+      display: flex;
+      gap: 15px;
+      flex-wrap: wrap;
+      justify-content: center;
     }
-    return null;
-  }
-}
+    
+    .id-card-wrapper {
+      flex: 1;
+      min-width: 240px;
+      max-width: 280px;
+      text-align: center;
+    }
 
-/**
- * Converts canvas image or direct file input to a Firebase Blob & uploads
- * @param {Object} storage - The initialized Firebase Storage instance
- * @param {HTMLCanvasElement} canvas 
- * @param {HTMLInputElement} fileInput 
- * @param {string} folderPath 
- * @returns {Promise<string|null>}
- */
-export async function uploadSelfieToFirebase(storage, canvas, fileInput, folderPath = 'selfies') {
-  let blob = null;
+    .dummy-card {
+      width: 100%;
+      height: 160px;
+      border-radius: 12px;
+      border: 2px dashed #0d6efd;
+      background: linear-gradient(135deg, #f0f7ff 0%, #e6f0fa 100%);
+      position: relative;
+      padding: 10px;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.05);
+      margin-bottom: 10px;
+    }
 
-  if (canvas && canvas.width > 0) {
-    blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.85));
-  } else if (fileInput && fileInput.files && fileInput.files.length > 0) {
-    blob = fileInput.files[0];
-  }
+    .card-header-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1.5px solid #ff9933;
+      padding-bottom: 3px;
+    }
 
-  if (!blob) return null;
-  return await uploadFileToFirebase(storage, blob, folderPath);
-}
+    .emblem-placeholder {
+      width: 15px;
+      height: 15px;
+      background: #bbb;
+      border-radius: 50%;
+    }
+
+    .header-text {
+      font-size: 9px;
+      font-weight: bold;
+      color: #138808;
+    }
+
+    .front-body {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-top: 5px;
+    }
+
+    .photo-box {
+      width: 55px;
+      height: 65px;
+      border: 1px solid #999;
+      background: #e0e0e0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 8px;
+      color: #666;
+      border-radius: 4px;
+    }
+
+    .details-box, .address-box {
+      text-align: left;
+      font-size: 9px;
+      line-height: 1.2;
+      color: #444;
+    }
+
+    .qr-box {
+      width: 60px;
+      height: 60px;
+      border: 1px solid #aaa;
+      background: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 8px;
+    }
+
+    .card-footer-num {
+      font-size: 11px;
+      font-weight: bold;
+      letter-spacing: 1px;
+    }
+  </style>
+</head>
+
+<body>
+
+  <div class="container py-3 py-md-5">
+    <div class="verification-card mx-auto shadow-lg" style="max-width: 550px;">
+
+      <div class="header mb-5 pb-4 text-center border-bottom border-light">
+        <h2 class="display-6 fw-bold text-primary mb-1">Vinyasa Nilaya</h2>
+        <div class="mt-2">
+          <span class="badge rounded-pill bg-success bg-opacity-10 text-success small border border-success border-opacity-25 px-3">
+            <i class="bi bi-shield-lock-fill me-1"></i> Secure Digital Check-in Portal
+          </span>
+        </div>
+      </div>
+
+      <div id="registrationForm">
+
+        <section class="mb-5" id="sec_identity">
+          <h5 class="mb-3 fw-bold text-primary">
+            <i class="bi bi-shield-check me-2"></i>1. Look Up Your Booking
+          </h5>
+
+          <div class="input-group shadow-sm mb-2">
+            <span class="input-group-text bg-white border-end-0"><i class="bi bi-whatsapp text-success"></i></span>
+            <input type="tel" id="searchMobile" class="form-control border-start-0 ps-0" style="font-size: 0.95rem;" placeholder="WhatsApp Number">
+            <button class="btn btn-primary fw-bold" type="button" id="searchBtn" onclick="handleMobileSearch()">Search</button>
+          </div>
+          <div class="px-1 mb-4">
+            <small class="text-muted">
+              <i class="bi bi-info-circle me-1"></i> Please enter the WhatsApp number used during booking to pull up your profile.
+            </small>
+          </div>
+
+          <div id="idUploadSection" class="d-none">
+            <div class="alert alert-info small py-2 mb-4">
+              <i class="bi bi-info-circle me-2"></i>No record found. Please scan your Govt ID to proceed.
+            </div>
+
+            <div class="mb-4 p-3 bg-light rounded-4 border-0 shadow-sm">
+              <label class="form-label small fw-bold text-muted text-uppercase d-block mb-3">Guest Nationality</label>
+              <div class="d-flex gap-4">
+                <div class="form-check">
+                  <input class="form-check-input" type="radio" name="nationality" id="natIndian" value="Indian" checked onchange="updateIdOptions()">
+                  <label class="form-check-label fw-bold" for="natIndian">🇮🇳 Indian Guest</label>
+                </div>
+                <div class="form-check">
+                  <input class="form-check-input" type="radio" name="nationality" id="natForeign" value="Foreign" onchange="updateIdOptions()">
+                  <label class="form-check-label fw-bold" for="natForeign">🌐 Foreign Guest</label>
+                </div>
+              </div>
+            </div>
+
+            <div class="mb-4">
+              <label class="form-label small fw-bold text-muted text-uppercase">Govt ID Type</label>
+              <select id="idType" class="form-select form-select-lg shadow-sm"></select>
+            </div>
+
+            <!-- ID Template Guides -->
+            <div id="idGuideSection" class="mb-4">
+              <!-- Aadhaar Guide -->
+              <div id="aadhaarGuide" class="d-none">
+                <div class="alert alert-warning small py-2 mb-3 border-0 shadow-sm" style="background-color: #fffbeb; color: #92400e;">
+                  <i class="bi bi-qr-code-scan me-2"></i><strong>Backside Requirement:</strong> Ensure the <strong>QR code</strong> is clearly visible for digital validation.
+                </div>
+                <div class="id-guide-container">
+                  <div class="id-card-wrapper">
+                    <div class="dummy-card">
+                      <div class="card-header-bar">
+                        <div class="emblem-placeholder"></div>
+                        <div class="header-text">Government of India</div>
+                      </div>
+                      <div class="front-body">
+                        <div class="photo-box">Face Photo</div>
+                        <div class="details-box">
+                          <strong>Name:</strong> FIRST LAST<br>
+                          <strong>DOB:</strong> DD/MM/YYYY<br>
+                          <strong>Gender:</strong> MALE
+                        </div>
+                      </div>
+                      <div class="card-footer-num text-center">XXXX XXXX XXXX</div>
+                    </div>
+                    <small class="text-muted fw-bold">1. FRONT PHOTO</small>
+                  </div>
+                  <div class="id-card-wrapper">
+                    <div class="dummy-card" style="border-color: #10b981;">
+                      <div class="card-header-bar">
+                        <div class="header-text w-100 text-center">UIDAI - Back Side</div>
+                      </div>
+                      <div class="front-body">
+                        <div class="address-box flex-grow-1">
+                          <strong>Address:</strong><br>S/O: Name, City<br>State - 000000
+                        </div>
+                        <div class="qr-box bg-white border-success text-success fw-bold">QR CODE</div>
+                      </div>
+                      <div class="card-footer-num text-center">XXXX XXXX XXXX</div>
+                    </div>
+                    <small class="text-muted fw-bold">2. BACK PHOTO (QR)</small>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Passport Guide -->
+              <div id="passportGuide" class="d-none">
+                <div class="alert alert-info small py-2 mb-3 border-0 shadow-sm">
+                  <i class="bi bi-info-circle me-2"></i>Please upload the <strong>Bio Data page</strong> as Front and <strong>Address page</strong> as Back.
+                </div>
+                <div class="id-guide-container">
+                  <div class="id-card-wrapper">
+                    <div class="dummy-card bg-primary bg-opacity-10 border-primary border-opacity-25" style="height: 120px;">
+                      <div class="photo-box" style="height: 40px; width: 40px;">Photo</div>
+                      <div class="small fw-bold">PASSPORT BIO PAGE</div>
+                    </div>
+                  </div>
+                  <div class="id-card-wrapper">
+                    <div class="dummy-card bg-primary bg-opacity-10 border-primary border-opacity-25" style="height: 120px;">
+                      <div class="small fw-bold mt-4">PASSPORT ADDRESS PAGE</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="row g-3 mb-4">
+              <!-- Front Side Box -->
+              <div class="col-6">
+                <div class="upload-box shadow-sm" onclick="openUploadOptions('front')" style="cursor: pointer;">
+                  <div id="frontPreview" class="preview-container text-center">
+                    <i class="bi bi-camera-fill h2 mb-1 text-primary"></i>
+                    <span class="d-block fw-semibold">Front Side</span>
+                  </div>
+                </div>
+                <input type="file" id="idFrontFile" hidden accept="image/*" onchange="handlePreview(this, 'frontPreview')">
+                <input type="file" id="idFrontCamera" hidden accept="image/*" capture="environment" onchange="handlePreview(this, 'frontPreview')">
+              </div>
+
+              <!-- Back Side Box -->
+              <div class="col-6">
+                <div class="upload-box shadow-sm" onclick="openUploadOptions('back')" style="cursor: pointer;">
+                  <div id="backPreview" class="preview-container text-center">
+                    <i class="bi bi-camera-fill h2 mb-1 text-primary"></i>
+                    <span class="d-block fw-semibold">Back Side</span>
+                  </div>
+                </div>
+                <input type="file" id="idBackFile" hidden accept="image/*" onchange="handlePreview(this, 'backPreview')">
+                <input type="file" id="idBackCamera" hidden accept="image/*" capture="environment" onchange="handlePreview(this, 'backPreview')">
+              </div>
+            </div>
+
+            <button type="button" id="scanBtn" class="btn btn-indigo w-100 py-3 fw-bold mb-4 shadow-sm" onclick="handleIdScan()" style="background-color: #4f46e5; border-color: #4f46e5; color: white;" disabled>
+              <span id="scanSpinner" class="spinner-border spinner-border-sm d-none me-2" role="status"></span>
+              <i class="bi bi-cpu-fill me-2" id="scanIcon"></i>
+              <span id="scanBtnText">Upload Both Sides First</span>
+            </button>
+          </div>
+
+          <div id="ocrConfirmation" class="p-4 border-0 rounded-4 bg-light shadow-inner d-none">
+            <p id="welcomeMsg" class="fw-bold text-success mb-3 small d-none">
+              <i class="bi bi-shield-check me-1"></i> Welcome back! Details loaded.
+            </p>
+
+            <div class="mb-3">
+              <label class="form-label small fw-bold text-muted text-uppercase">Full Name</label>
+              <input type="text" id="name" class="form-control form-control-lg border-0 shadow-sm" required>
+            </div>
+            <div class="mb-3">
+              <label class="form-label small fw-bold text-muted text-uppercase">ID Number</label>
+              <input type="text" id="idNumber" class="form-control form-control-lg border-0 shadow-sm" required>
+            </div>
+
+            <div id="verificationNote" class="p-3 mb-3 border-0 rounded-3 bg-white shadow-sm" style="border-left: 4px solid #0d6efd !important;">
+              <p class="mb-0 small text-muted">
+                <i class="bi bi-info-circle-fill text-primary me-1"></i>
+                <strong>Verification:</strong> Please review the loaded details. If any information was misread during the scan, feel free to update the fields manually.
+              </p>
+            </div>
+            <!-- Identity Verification Callout Card -->
+            <label class="consent-card">
+              <input 
+                type="checkbox" 
+                id="detailsVerified" 
+                class="form-check-input consent-checkbox" 
+                required 
+                onchange="toggleSecondarySections(this.checked)"
+              >
+              <span class="consent-card-text">
+                I confirm these identity details are verified and correct.
+              </span>
+            </label>
+          </div>
+        </section>
+
+        <section class="mb-5 d-none" id="sec_emergency">
+          <h5 class="mb-3 fw-bold text-primary"><i class="bi bi-telephone-plus-fill me-2"></i>2. Emergency Contact</h5>
+          <div class="row g-3">
+            <div class="col-md-6">
+              <label class="form-label small fw-bold text-muted text-uppercase">Contact Person</label>
+              <input type="text" id="emergencyName" class="form-control form-control-lg shadow-sm" placeholder="Full Name">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small fw-bold text-muted text-uppercase">Emergency Phone</label>
+              <input type="tel" id="emergencyPhone" class="form-control form-control-lg shadow-sm" placeholder="Phone Number">
+            </div>
+          </div>
+        </section>
+
+        <section class="mb-5 d-none" id="sec_travel">
+          <h5 class="mb-3 fw-bold text-primary"><i class="bi bi-airplane-engines-fill me-2"></i>3. Travel Information</h5>
+          <div class="row g-3 mb-3">
+            <div class="col-md-6">
+              <label class="form-label small fw-bold text-muted text-uppercase">Arriving From (City)</label>
+              <input type="text" id="city" class="form-control form-control-lg shadow-sm" placeholder="e.g. Bengaluru">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small fw-bold text-muted text-uppercase">Purpose of Travel</label>
+              <select id="purpose" class="form-select form-select-lg shadow-sm">
+                <option value="">Select Purpose</option>
+                <option value="Tourism/Leisure">Tourism/Leisure</option>
+                <option value="Business">Business</option>
+                <option value="Study">Study</option>
+                <option value="Work">Work</option>
+                <option value="Volunteering">Volunteering</option>
+                <option value="Event\Concert">Event\Concert</option>
+                <option value="Mysuru-Dasara">Mysuru-Dasara</option>
+                <option value="Ayurveda\Therapy">Ayurveda\Therapy</option>
+                <option value="Other">Other</option>
+              </select>
+            </div>
+          </div>
+          <div class="mt-3">
+            <label class="form-label small fw-bold text-muted text-uppercase">Registration WhatsApp Number</label>
+            <input type="tel" id="whatsapp" class="form-control form-control-lg shadow-sm bg-light" placeholder="+91 00000 00000" readonly>
+            <small class="text-muted">Managed via search mobile number</small>
+          </div>
+        </section>
+
+        <section class="mb-5 d-none" id="sec_selfie">
+          <h5 class="mb-3 fw-bold text-primary">
+            <i class="bi bi-person-bounding-box me-2"></i>4. Identity Verification (Selfie)
+          </h5>
+
+          <div id="selfieContainer" class="position-relative overflow-hidden shadow-sm mb-2 rounded-4 bg-dark" style="height: 300px; cursor: pointer;" onclick="initiateSelfieProcess()">
+            <!-- Default Camera Placeholder -->
+            <div id="cameraPlaceholder" class="w-100 h-100 d-flex flex-column align-items-center justify-content-center bg-light border">
+              <div class="rounded-circle bg-primary bg-opacity-10 p-4 mb-3">
+                <i class="bi bi-camera-fill h1 text-primary mb-0"></i>
+              </div>
+              <span class="fw-bold">Tap to Take Verification Selfie</span>
+            </div>
+
+            <!-- Live Stream Video -->
+            <video id="selfieStream" autoplay playsinline muted class="d-none w-100 h-100" style="object-fit: cover; transform: scaleX(-1);"></video>
+            
+            <!-- Face Positioning Oval Guide -->
+            <div id="selfieGuide" class="d-none position-absolute top-50 start-50 translate-middle border border-success border-4 rounded-circle" style="width: 180px; height: 180px; opacity: 0.7; z-index: 10; pointer-events: none;"></div>
+
+            <!-- Capture Button Overlay (Stops Propagation) -->
+            <div id="captureOverlay" class="d-none position-absolute bottom-0 start-0 w-100 p-3 text-center" style="z-index: 11;" onclick="event.stopPropagation();">
+              <button type="button" class="btn btn-light rounded-circle shadow-lg p-3" onclick="event.stopPropagation(); takeSnapshot();">
+                <i class="bi bi-camera-fill h4 mb-0"></i>
+              </button>
+            </div>
+
+            <!-- Captured Snapshot Canvas -->
+            <canvas id="selfieCanvas" class="d-none w-100 h-100 position-absolute top-0 start-0" style="object-fit: cover; z-index: 12;"></canvas>
+          </div>
+
+          <!-- Fallback File Input -->
+          <input type="file" id="selfieInput" hidden accept="image/*" capture="user" onchange="handleFallbackSelfie(this)">
+
+          <div class="d-flex justify-content-between px-1">
+            <small class="text-muted" id="selfieStatus">Camera ready</small>
+            <button type="button" class="btn btn-link btn-sm text-decoration-none d-none" id="retakeBtn" onclick="restartCamera()">Retake Photo</button>
+          </div>
+        </section>
+
+        <section class="mb-4 d-none" id="sec_terms">
+          <h5 class="mb-3 fw-bold text-primary"><i class="bi bi-shield-lock-fill me-2"></i>5. Terms & Conditions</h5>
+          <div class="p-3 bg-white border rounded-4 mb-3 shadow-inner" style="max-height: 150px; overflow-y: auto; font-size: 0.85rem;">
+            <ol class="ps-3 mb-0 text-muted">
+              <li class="mb-2"><strong>Identification:</strong> Guests must present a valid, original government-issued photo ID upon arrival for verification.</li>
+              <li class="mb-2"><strong>Right of Admission:</strong> Management reserves the right to decline check-in or residency for non-compliance with house policies.</li>
+              <li class="mb-2"><strong>Timing:</strong> Check-in is scheduled between 12:00 PM – 1:00 PM; Check-out is strictly required by 11:00 AM.</li>
+              <li class="mb-2"><strong>Premises Standards:</strong> Vinyasa Nilaya maintains a strict zero-tolerance policy regarding alcohol, smoking, and the preparation or consumption of non-vegetarian dishes.</li>
+              <li class="mb-2"><strong>Liability:</strong> The guest is held financially responsible for any damages caused to the property, fixtures, or furniture during their stay.</li>
+              <li class="mb-2"><strong>Guest Policy:</strong> To maintain a healthy environment, we primarily host married families and single-gender groups. We do not accommodate unmarried couples, students, or unapproved visitors on the premises.</li>
+              <li><strong>Declaration:</strong> I hereby confirm that all information provided is accurate and pledge to adhere to these guidelines throughout my stay at Vinyasa Nilaya.</li>
+            </ol>
+          </div>
+
+         <!-- Terms & Conditions Callout Card -->
+        <label class="consent-card">
+          <input 
+            type="checkbox" 
+            id="termsAccepted" 
+            class="form-check-input consent-checkbox" 
+            required 
+            onchange="validateFormCompletion()">
+          <span class="consent-card-text">
+            I accept the Vinyasa Nilaya House Rules & Terms.
+          </span>
+        </label>
+        </section>
+
+        <div id="submitContainer" class="d-none">
+          <div id="submitWarningMessage" class="alert alert-warning small py-2 mb-3 text-center fw-semibold">
+            <i class="bi bi-exclamation-triangle-fill me-2"></i>Please accept the House Rules to unlock check-in.
+          </div>
+          <button id="submitBtn" class="btn btn-success btn-lg w-100 py-3 fw-bold shadow-sm rounded-pill opacity-50" onclick="finalSubmit()" disabled>
+            Complete Check-in
+          </button>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <input type="hidden" id="isExistingGuest" value="false">
+  <input type="hidden" id="rowNumber" value="">
+  <input type="hidden" id="address" value="">
+
+  <!-- Modals -->
+  <!-- ID Source Selection Modal -->
+  <div class="modal fade" id="uploadChoiceModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-sm">
+      <div class="modal-content border-0 rounded-4 shadow text-center p-3">
+        <h6 class="fw-bold mb-3 text-primary" id="uploadChoiceTitle">Select Upload Source</h6>
+        <div class="d-grid gap-2">
+          <button type="button" class="btn btn-outline-primary py-2 fw-bold" onclick="triggerUploadSource('camera')">
+            <i class="bi bi-camera-fill me-2"></i>Take Photo (Camera)
+          </button>
+          <button type="button" class="btn btn-outline-secondary py-2 fw-bold" onclick="triggerUploadSource('file')">
+            <i class="bi bi-folder-fill me-2"></i>Choose from File / Gallery
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal fade" id="errorModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content border-0 rounded-4 shadow">
+        <div class="modal-body text-center p-4">
+          <i class="bi bi-exclamation-circle-fill text-danger mb-3" style="font-size: 3rem;"></i>
+          <h5 class="fw-bold mb-2">Scan Failed</h5>
+          <p id="errorModalMessage" class="text-muted mb-4">The image was too blurry or didn't contain valid details.</p>
+          <button type="button" class="btn btn-primary w-100 py-2 fw-bold" data-bs-dismiss="modal">Try Again</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal fade" id="permissionModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content border-0 rounded-4 shadow">
+        <div class="modal-body text-center p-4">
+          <div class="mb-3">
+            <i class="bi bi-camera-video-off text-warning" style="font-size: 3rem;"></i>
+          </div>
+          <h5 class="fw-bold mb-2">Camera Access Required</h5>
+          <p class="text-muted mb-4">
+            To verify your identity, please allow camera access in your browser settings. Look for the <strong>lock icon</strong> in your address bar to enable it.
+          </p>
+          <button type="button" class="btn btn-warning w-100 py-2 fw-bold text-white" data-bs-dismiss="modal">I've Enabled It</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal fade" id="notificationModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content border-0 rounded-4 shadow">
+        <div class="modal-body p-4 text-center">
+          <div id="modalIconContainer" class="mb-3"></div>
+          <h5 id="modalTitle" class="fw-bold mb-2">Notice</h5>
+          <p id="modalMessage" class="text-muted mb-4"></p>
+          <button type="button" class="btn btn-primary w-100 rounded-pill py-2 fw-bold" data-bs-dismiss="modal" id="modalActionBtn">
+            Continue
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- JS Module Script -->
+  <script type="module" src="js/app.js"></script>
+</body>
+
+</html>

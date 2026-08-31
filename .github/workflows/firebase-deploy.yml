@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - latest-features
 
 jobs:
   build_and_deploy:
