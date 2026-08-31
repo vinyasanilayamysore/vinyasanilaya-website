@@ -1139,6 +1139,15 @@ window.finalSubmit = async function() {
     return;
   }
 
+  if (phone === emergencyPhone) {
+    showNotification("Invalid Emergency Contact", "The emergency contact number must be different from your primary WhatsApp number to ensure we can reach someone else in case of emergency.", false);
+    if (emergencyPhoneEl) { 
+      emergencyPhoneEl.value = ''; 
+      emergencyPhoneEl.focus(); 
+    }
+    return;
+  }
+
   submitBtn.disabled = true;
   submitBtn.innerHTML = `<span class="spinner-border spinner-border-sm me-2"></span>Submitting Check-in...`;
 
@@ -1315,23 +1324,24 @@ function updateIdOptions() {
   const idSelect = document.getElementById('idType');
   
   if (!idSelect) return;
+
+  const aadhaarGuide = document.getElementById('aadhaarGuide');
+  const passportGuide = document.getElementById('passportGuide');
   
   // Clear existing options
   idSelect.innerHTML = '';
 
   if (isIndian) {
-    const indianOptions = [
-      { val: 'Aadhaar', text: 'Aadhaar Card' },
-      { val: 'VoterID', text: 'Voter ID' },
-      { val: 'DL', text: 'Driving License' }
-    ];
-    indianOptions.forEach(opt => {
-      idSelect.options.add(new Option(opt.text, opt.val));
-    });
+    // Restrict Indian guests to only Aadhaar Card as requested
+    idSelect.options.add(new Option('Aadhaar Card', 'Aadhaar'));
+    if (aadhaarGuide) aadhaarGuide.classList.remove('d-none');
+    if (passportGuide) passportGuide.classList.add('d-none');
   } else {
+    // Foreign guests are restricted to Passport
     idSelect.options.add(new Option('Passport', 'Passport'));
+    if (aadhaarGuide) aadhaarGuide.classList.add('d-none');
+    if (passportGuide) passportGuide.classList.remove('d-none');
   }
-
 }
 
 /**
