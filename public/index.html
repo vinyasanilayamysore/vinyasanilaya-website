@@ -3,11 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Vinyasa Nilaya | Guest Portal</title>
+  <title>Vinyasa Nilaya | Coming Soon</title>
   
   <!-- Prevent 404 Favicon Errors -->
   <link rel="icon" href="data:,">
-  
+
   <!-- PWA Manifest & Theme -->
   <meta name="theme-color" content="#2563eb">
   <link rel="apple-touch-icon" href="/icons/icon-192.png">
@@ -22,268 +22,91 @@
       background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
       font-family: 'Inter', sans-serif;
       min-height: 100vh;
-      padding: 2rem 1rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0;
     }
-    .portal-card {
+    .coming-soon-card {
       background: #ffffff;
       border-radius: 24px;
-      padding: 2rem;
+      padding: 3rem 2rem;
+      max-width: 500px;
+      width: 90%;
       box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
-      max-width: 1100px;
-      margin: 0 auto;
+      z-index: 1;
     }
-    .debug-console {
-      background: #1e293b;
-      color: #38bdf8;
-      font-family: monospace;
-      font-size: 12px;
+    .btn-contact {
+      background-color: #2563eb;
+      color: #ffffff;
+      text-decoration: none;
+      padding: 0.75rem 1.25rem;
       border-radius: 12px;
-      max-height: 200px;
-      overflow-y: auto;
-      padding: 1rem;
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      transition: all 0.2s;
+    }
+    .btn-contact:hover {
+      background-color: #1d4ed8;
+      color: #ffffff;
+    }
+    .whatsapp-float {
+      position: fixed;
+      bottom: 25px;
+      right: 25px;
+      background-color: #25d366;
+      color: white;
+      border-radius: 50px;
+      padding: 12px 24px;
+      font-weight: 600;
+      text-decoration: none;
+      z-index: 1000;
+      box-shadow: 0 4px 15px rgba(37, 211, 102, 0.4);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      transition: all 0.3s ease;
+    }
+    .whatsapp-float:hover {
+      transform: translateY(-5px);
+      color: white;
+      box-shadow: 0 6px 20px rgba(37, 211, 102, 0.6);
     }
   </style>
 </head>
 <body>
 
-  <div class="portal-card">
-    <!-- Header -->
-    <div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
-      <div>
-        <h1 class="h3 fw-bold text-dark mb-0">Vinyasa Nilaya</h1>
-        <small class="text-muted">PWA Guest Check-in & Database Portal</small>
-      </div>
+  <!-- Floating WhatsApp Booking -->
+  <a href="https://wa.me/919980950950" target="_blank" class="whatsapp-float">
+    <i class="bi bi-whatsapp fs-5"></i>
+    <span>Book on WhatsApp</span>
+  </a>
+
+  <div class="coming-soon-card text-center">
+    <div class="mb-3">
       <span class="badge rounded-pill bg-primary bg-opacity-10 text-primary px-3 py-2 fw-semibold">
-        <i class="bi bi-cloud-check-fill me-1"></i> Firebase Connected
+        <i class="bi bi-stars me-1"></i> Under Construction
       </span>
     </div>
+    <h1 class="display-6 fw-bold text-dark mb-2">Vinyasa Nilaya</h1>
+    <p class="text-muted mb-4">Our official website is coming soon. For reservations and stay inquiries, please get in touch with us directly.</p>
 
-    <!-- Navigation Tabs -->
-    <ul class="nav nav-pills mb-4" id="portalTabs" role="tablist">
-      <li class="nav-item" role="presentation">
-        <button class="nav-link active" id="checkin-tab" data-bs-toggle="pill" data-bs-target="#checkin" type="button">Guest Check-In</button>
-      </li>
-      <li class="nav-item" role="presentation">
-        <button class="nav-link" id="records-tab" data-bs-toggle="pill" data-bs-target="#records" type="button" onclick="loadGuestRecords()">Guest Records</button>
-      </li>
-    </ul>
-
-    <div class="tab-content" id="portalTabsContent">
-      <!-- Tab 1: Check-in Form -->
-      <div class="tab-pane fade show active" id="checkin" role="tabpanel">
-        <form id="guestCheckinForm" class="row g-3">
-          <div class="col-md-4">
-            <label class="form-label fw-semibold">Full Name</label>
-            <input type="text" class="form-control" id="guestName" required>
-          </div>
-          <div class="col-md-4">
-            <label class="form-label fw-semibold">Phone Number</label>
-            <input type="tel" class="form-control" id="guestPhone" placeholder="+91..." required>
-          </div>
-          <div class="col-md-4">
-            <label class="form-label fw-semibold">ID Type</label>
-            <select class="form-select" id="idType" required>
-              <option value="">Select ID Type</option>
-              <option value="Aadhaar">Aadhaar</option>
-              <option value="Passport">Passport</option>
-              <option value="Driving License">Driving License</option>
-              <option value="Voter ID">Voter ID</option>
-            </select>
-          </div>
-
-          <div class="col-md-4">
-            <label class="form-label fw-semibold">ID Number</label>
-            <input type="text" class="form-control" id="idNo" required>
-          </div>
-          <div class="col-md-4">
-            <label class="form-label fw-semibold">Arriving City</label>
-            <input type="text" class="form-control" id="arrivingCity">
-          </div>
-          <div class="col-md-4">
-            <label class="form-label fw-semibold">Purpose of Travel</label>
-            <input type="text" class="form-control" id="purposeOfTravel">
-          </div>
-
-          <div class="col-md-6">
-            <label class="form-label fw-semibold">Emergency Contact Name</label>
-            <input type="text" class="form-control" id="emergencyName">
-          </div>
-          <div class="col-md-6">
-            <label class="form-label fw-semibold">Emergency Contact Phone</label>
-            <input type="tel" class="form-control" id="emergencyPhone">
-          </div>
-
-          <div class="col-md-4">
-            <label class="form-label fw-semibold">Govt ID Front URL</label>
-            <input type="url" class="form-control" id="govtIdFrontUrl" placeholder="https://...">
-          </div>
-          <div class="col-md-4">
-            <label class="form-label fw-semibold">Govt ID Back URL</label>
-            <input type="url" class="form-control" id="govtIdBackUrl" placeholder="https://...">
-          </div>
-          <div class="col-md-4">
-            <label class="form-label fw-semibold">Selfie Image URL</label>
-            <input type="url" class="form-control" id="selfieUrl" placeholder="https://...">
-          </div>
-
-          <div class="col-12">
-            <label class="form-label fw-semibold">Full Address</label>
-            <textarea class="form-control" id="address" rows="2"></textarea>
-          </div>
-
-          <div class="col-12 mt-4">
-            <button type="submit" class="btn btn-primary px-4 py-2 rounded-3">
-              <i class="bi bi-save me-1"></i> Save Guest Check-In
-            </button>
-          </div>
-        </form>
-      </div>
-
-      <!-- Tab 2: Records Data Table -->
-      <div class="tab-pane fade" id="records" role="tabpanel">
-        <div class="table-responsive">
-          <table class="table table-hover align-middle">
-            <thead class="table-light">
-              <tr>
-                <th>Created At</th>
-                <th>Name</th>
-                <th>Phone</th>
-                <th>ID Type</th>
-                <th>City</th>
-                <th>Status</th>
-                <th class="text-end">Actions</th>
-              </tr>
-            </thead>
-            <tbody id="guestTableBody">
-              <tr>
-                <td colspan="7" class="text-center text-muted py-4">Click "Guest Records" to load database content.</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+    <div class="p-3 bg-light rounded-4 mb-4 border">
+      <small class="text-uppercase fw-bold text-muted d-block mb-2">For Bookings & Inquiries</small>
+      <div class="d-flex flex-column gap-2">
+        <a href="tel:+919980950950" class="btn-contact justify-content-center">
+          <i class="bi bi-telephone-fill"></i> +91 99809 50950
+        </a>
+        <a href="tel:+919972433994" class="btn-contact justify-content-center">
+          <i class="bi bi-telephone-fill"></i> +91 99724 33994
+        </a>
       </div>
     </div>
 
-    <!-- PWA On-Screen Debug Console -->
-    <div class="mt-5">
-      <div class="d-flex justify-content-between align-items-center mb-2">
-        <small class="fw-bold text-uppercase text-muted">System & Data Console</small>
-        <button class="btn btn-sm btn-outline-secondary py-0" style="font-size:11px" onclick="clearLogs()">Clear</button>
-      </div>
-      <div id="debugConsole" class="debug-console">
-        <div>[Log System Loaded] Waiting for user actions...</div>
-      </div>
-    </div>
+    <small class="text-muted">Looking to complete your check-in? <a href="/guestverification" class="text-primary fw-semibold">Click here</a></small>
   </div>
 
-  <!-- Edit Record Modal -->
-  <div class="modal fade" id="editModal" tabindex="-1" aria-labelledby="editModalLabel" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered">
-      <div class="modal-content">
-        <div class="modal-header">
-          <h5 class="modal-title fw-bold" id="editModalLabel">Modify Guest Record</h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-        </div>
-        <form id="editGuestForm">
-          <div class="modal-body">
-            <input type="hidden" id="editDocId">
-            <div class="mb-3">
-              <label class="form-label fw-semibold">Name</label>
-              <input type="text" class="form-control" id="editGuestName" required>
-            </div>
-            <div class="mb-3">
-              <label class="form-label fw-semibold">Phone</label>
-              <input type="tel" class="form-control" id="editGuestPhone" required>
-            </div>
-            <div class="mb-3">
-              <label class="form-label fw-semibold">ID Type</label>
-              <select class="form-select" id="editIdType" required>
-                <option value="Aadhaar">Aadhaar</option>
-                <option value="Passport">Passport</option>
-                <option value="Driving License">Driving License</option>
-                <option value="Voter ID">Voter ID</option>
-              </select>
-            </div>
-            <div class="mb-3">
-              <label class="form-label fw-semibold">ID Number</label>
-              <input type="text" class="form-control" id="editIdNo" required>
-            </div>
-            <div class="mb-3">
-              <label class="form-label fw-semibold">Arriving City</label>
-              <input type="text" class="form-control" id="editArrivingCity">
-            </div>
-            <div class="row g-2 mb-3">
-              <div class="col-4">
-                <label class="form-label fw-semibold small">ID Front</label>
-                <div id="editIdFrontPreview" class="border rounded bg-light d-flex align-items-center justify-content-center" style="height: 80px; overflow: hidden;">
-                  <span class="text-muted small">No Image</span>
-                </div>
-              </div>
-              <div class="col-4">
-                <label class="form-label fw-semibold small">ID Back</label>
-                <div id="editIdBackPreview" class="border rounded bg-light d-flex align-items-center justify-content-center" style="height: 80px; overflow: hidden;">
-                  <span class="text-muted small">No Image</span>
-                </div>
-              </div>
-              <div class="col-4">
-                <label class="form-label fw-semibold small">Selfie</label>
-                <div id="editSelfiePreview" class="border rounded bg-light d-flex align-items-center justify-content-center" style="height: 80px; overflow: hidden;">
-                  <span class="text-muted small">No Image</span>
-                </div>
-              </div>
-            </div>
-            <div class="mb-3">
-              <label class="form-label fw-semibold">Status</label>
-              <select class="form-select" id="editCheckinStatus">
-                <option value="CHECKED_IN">CHECKED_IN</option>
-                <option value="CHECKED_OUT">CHECKED_OUT</option>
-                <option value="PENDING">PENDING</option>
-              </select>
-            </div>
-          </div>
-          <div class="modal-footer">
-            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-            <button type="submit" class="btn btn-primary">Save Changes</button>
-          </div>
-        </form>
-      </div>
-    </div>
-  </div>
-
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-  
-  <!-- Inline Logger Setup & Service Worker Auto-Update Registration -->
-  <script>
-    function logToScreen(level, message, data = '') {
-      const debugConsole = document.getElementById('debugConsole');
-      if (!debugConsole) return;
-      const time = new Date().toLocaleTimeString();
-      const entry = document.createElement('div');
-      const dataStr = data ? ` | ${JSON.stringify(data)}` : '';
-      entry.innerHTML = `<span style="opacity:0.6">[${time}]</span> <strong>[${level}]</strong> ${message}${dataStr}`;
-      debugConsole.appendChild(entry);
-      debugConsole.scrollTop = debugConsole.scrollHeight;
-    }
-
-    function clearLogs() { 
-      const debugConsole = document.getElementById('debugConsole');
-      if (debugConsole) debugConsole.innerHTML = '<div>[Console Cleared]</div>'; 
-    }
-
-  // Unregister any active PWA Service Workers to force live updates
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.getRegistrations().then(function(registrations) {
-      for (let registration of registrations) {
-        registration.unregister().then(function(boolean) {
-          console.log('🔄 [PWA Reset] Service Worker unregistered:', boolean);
-        });
-      }
-    });
-  }
-    
-  </script>
-
-  <!-- Application Script -->
-  <script type="module" src="js/index.js"></script>
 </body>
 </html>
