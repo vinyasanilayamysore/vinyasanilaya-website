@@ -30,3 +30,9 @@ jobs:
       # Deploys Firestore Rules
       - name: Deploy Firestore Rules
         run: npx firebase-tools deploy --only firestore:rules --project vinyasanilaya-website
+
+      - name: Build Summary
+        run: |
+          echo "### 🚀 Deployment Successful" >> $GITHUB_STEP_SUMMARY
+          echo "- **Main Website:** https://vinyasanilaya.com" >> $GITHUB_STEP_SUMMARY
+          echo "- **Guest Verification Portal:** https://vinyasanilaya.com/guestverification" >> $GITHUB_STEP_SUMMARY
