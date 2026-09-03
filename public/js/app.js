@@ -77,22 +77,34 @@ async function validateImageQuality(base64Data) {
     img.onload = () => {
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d');
-      canvas.width = img.width;
-      canvas.height = img.height;
-      ctx.drawImage(img, 0, 0);
+      // Downsample for rapid quality analysis
+      const checkDim = 100; 
+      canvas.width = checkDim;
+      canvas.height = checkDim;
+      ctx.drawImage(img, 0, 0, checkDim, checkDim);
 
-      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const imageData = ctx.getImageData(0, 0, checkDim, checkDim);
       const data = imageData.data;
       let grayscaleSum = 0;
+      let totalVariance = 0;
 
-      // Check Brightness
+      // Check Brightness & Variance (detects blank/solid color images)
       for (let i = 0; i < data.length; i += 4) {
-        grayscaleSum += (data[i] + data[i + 1] + data[i + 2]) / 3;
+        const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
+        grayscaleSum += avg;
+        totalVariance += Math.abs(avg - 128); // Variance from mid-gray
       }
-      const avgBrightness = grayscaleSum / (data.length / 4);
+      const numPixels = data.length / 4;
+      const avgBrightness = grayscaleSum / numPixels;
 
       if (avgBrightness < 40) {
         resolve({ valid: false, reason: "The image is too dark. Please use better lighting." });
+        return;
+      }
+
+      // Catch solid blocks of color or blank images
+      if (totalVariance / numPixels < 5) {
+        resolve({ valid: false, reason: "Image appears completely blank or out of focus. Please capture your ID clearly." });
         return;
       }
 
@@ -181,6 +193,25 @@ window.handleIdScan = async function() {
 
     frontImageBase64 = frontBase64;
     backImageBase64 = backBase64;
+
+    // 1.5. Execute Visual AI Classification (Layer 2 & 3)
+    if (btnText) btnText.innerText = 'Verifying Authenticity...';
+    
+    const [frontClass, backClass] = await Promise.all([
+      classifyImage(frontBase64),
+      classifyImage(backBase64)
+    ]);
+
+    // Map UI nationality to ISO code for validator
+    const guestNatCode = nationality === 'Indian' ? 'IN' : 'Foreign';
+    
+    const frontValid = validateUploadedDocument(guestNatCode, 'front', frontClass);
+    const backValid = validateUploadedDocument(guestNatCode, 'back', backClass);
+
+    if (!frontValid.success || !backValid.success) {
+      const reason = !frontValid.success ? "Front Side: " + frontValid.message : "Back Side: " + backValid.message;
+      throw new Error(reason);
+    }
 
     // 2. Execute OCR Extraction via Cloud Run Vision API backend
     const res = await executeOcrFlow(frontBase64, backBase64, idType, nationality);
@@ -285,6 +316,56 @@ async function checkIdMobileAssociation(extractedId, currentMobile) {
     console.error("Conflict check error:", error);
     return { conflict: false };
   }
+}
+
+/**
+ * Layer 2: Visual AI Classifier
+ * Calls backend to verify image matches expected document type tags.
+ */
+async function classifyImage(base64Data) {
+  const cleanBase64 = base64Data.replace(/^data:image\/(png|jpeg|jpg);base64,/, "");
+  try {
+    const response = await fetch('https://ocr-proxy-547333535578.asia-south1.run.app/classify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: cleanBase64 })
+    });
+    if (!response.ok) throw new Error("Classification service unavailable");
+    return await response.json();
+  } catch (error) {
+    console.warn("Classifier fallback: ", error.message);
+    // Fallback: allow processing if service is down, rely on OCR keywords later
+    return { doc_type: "unknown", is_valid_id: true };
+  }
+}
+
+/**
+ * Layer 3: Slot & Nationality Rule Matching
+ */
+function validateUploadedDocument(guestNationality, targetSlot, classification) {
+  if (classification.doc_type === "unknown") return { success: true };
+
+  if (!classification.is_valid_id || classification.doc_type === "invalid") {
+    return { 
+      success: false, 
+      message: classification.rejection_reason || "This doesn't look like a valid ID card." 
+    };
+  }
+
+  if (guestNationality === "IN") {
+    if (targetSlot === "front" && classification.doc_type !== "aadhaar_front") {
+      return { success: false, message: "Please upload the Front side of your Aadhaar Card." };
+    }
+    if (targetSlot === "back" && classification.doc_type !== "aadhaar_back") {
+      return { success: false, message: "Please upload the Back side of your Aadhaar (containing QR code)." };
+    }
+  } else {
+    if (classification.doc_type !== "passport") {
+      return { success: false, message: "Foreign nationals must provide a clear Passport biodata page." };
+    }
+  }
+
+  return { success: true };
 }
 
 /**
