@@ -1199,9 +1199,27 @@ window.finalSubmit = async function() {
     };
 
     if (isExisting && docId) {
-      // Use dot notation logic if you have other nested fields, 
-      // but for this flat verification object updateDoc(payload) is sufficient here.
-      await updateDoc(doc(db, "guests", docId), payload);
+      // Use dot notation to update specific fields without overwriting 
+      // the entire verification object (preserving existing ID URLs)
+      const updateData = {
+        "guestDetails.name": payload.guestDetails.name,
+        "guestDetails.phone": payload.guestDetails.phone,
+        "verification.idType": payload.verification.idType,
+        "verification.idNo": payload.verification.idNo,
+        "verification.verified": payload.verification.verified,
+        "emergencyContact": payload.emergencyContact,
+        "travelDetails": payload.travelDetails,
+        "verifiedStatus": payload.verifiedStatus,
+        "updatedAt": payload.updatedAt
+      };
+
+      if (selfieUrl) updateData.selfieUrl = selfieUrl;
+      
+      // Only update ID URLs if new ones were actually uploaded
+      if (idFrontUrl) updateData["verification.idFrontUrl"] = idFrontUrl;
+      if (idBackUrl) updateData["verification.idBackUrl"] = idBackUrl;
+
+      await updateDoc(doc(db, "guests", docId), updateData);
     } else {
       payload.createdAt = serverTimestamp();
       await addDoc(collection(db, "guests"), payload);
