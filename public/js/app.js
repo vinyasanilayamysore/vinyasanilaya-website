@@ -148,10 +148,10 @@ window.handleIdScan = async function() {
   const idType = document.getElementById('idType')?.value || 'Document';
 
   if (!frontFile || !backFile) {
-    return showNotification("Upload Required", "Please upload both Front and Back side images of your ID card.", "warning");
+    return showNotification("Upload Required", "Please upload both Front and Back side images of your ID card.", false);
   }
   if (!currentMobile) {
-    return showNotification("Mobile Required", "Mobile number is required for registration matching.", "warning");
+    return showNotification("Mobile Required", "Mobile number is required for registration matching.", false);
   }
 
   const btn = document.getElementById('scanBtn');
@@ -175,7 +175,7 @@ window.handleIdScan = async function() {
 
     if (!frontQuality.valid || !backQuality.valid) {
       const reason = (!frontQuality.valid ? "Front: " + frontQuality.reason : "Back: " + backQuality.reason);
-      showNotification("Low Quality Image", reason, "warning");
+      showNotification("Low Quality Image", reason, false);
       throw new Error(reason);
     }
 
@@ -202,10 +202,10 @@ window.handleIdScan = async function() {
       showNotification(
         "Security Alert", 
         `This identification document is recorded under another profile (${checkRes.existingName || 'Existing Guest'}).`, 
-        "error"
+        false
       );
 
-      updateScanButtonState();
+      resetScanUI();
       return;
     }
 
@@ -236,8 +236,13 @@ window.handleIdScan = async function() {
       if (btnText) btnText.innerText = 'Verify & Scan Document Now';
     }
     if (spinner) spinner.classList.add('d-none');
-    updateScanButtonState();
-    showNotification("Scan Failed", err.message || "Could not read ID details. Please try with clearer photos.", "error");
+    
+    resetScanUI();
+    showNotification(
+      "Scan Failed", 
+      err.message || "Could not read ID details. Please try with clearer photos of the original document.", 
+      false
+    );
   }
 };
 
@@ -336,18 +341,30 @@ async function executeOcrFlow(frontBase64, backBase64, idType, nationality) {
       throw new Error("This doesn't look like a valid Government ID. Please upload clear photos.");
     }
 
+    let result;
     switch (idType) {
       case "Aadhaar":
-        return parseAadhaarData(combinedRawText);
+        result = parseAadhaarData(combinedRawText);
+        break;
       case "VoterID":
-        return parseVoterIDData(combinedRawText);
+        result = parseVoterIDData(combinedRawText);
+        break;
       case "DL":
-        return parseDrivingLicenseData(combinedRawText);
+        result = parseDrivingLicenseData(combinedRawText);
+        break;
       case "Passport":
-        return parsePassportData(combinedRawText);
+        result = parsePassportData(combinedRawText);
+        break;
       default:
         throw new Error("Unsupported ID type selected.");
     }
+
+    // Strict Validation: Ensure that essential data was extracted
+    if (!result.idNumber || result.idNumber.length < 5 || result.name === "Not found") {
+      throw new Error(`Incomplete scan: We couldn't detect a valid ${idType} Number or Name. Ensure you are scanning the original document in good light.`);
+    }
+
+    return result;
   } catch (e) {
     console.error("OCR Flow Error: " + e.message);
     throw e;
@@ -826,7 +843,7 @@ window.handleMobileSearch = async function() {
       window.logToScreen('ERROR', `Lookup failed for ${mobileInput}`, `${error.code || 'Error'}: ${error.message}`);
     }
     if (typeof showNotification === 'function') {
-      showNotification("Error", "Could not fetch details: " + error.message, "error");
+      showNotification("Error", "Could not fetch details: " + error.message, false);
     }
   } finally {
     if (searchBtn) {
