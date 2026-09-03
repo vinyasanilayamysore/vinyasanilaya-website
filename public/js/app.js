@@ -277,6 +277,26 @@ window.handleIdScan = async function() {
   }
 };
 
+/**
+ * Resets the ID scan UI elements to their initial state.
+ */
+function resetScanUI() {
+  frontImageBase64 = null;
+  backImageBase64 = null;
+
+  const frontPreview = document.getElementById('idFrontPreview');
+  const backPreview = document.getElementById('idBackPreview');
+  if (frontPreview) frontPreview.innerHTML = '';
+  if (backPreview) backPreview.innerHTML = '';
+
+  const ocrConfirmEl = document.getElementById('ocrConfirmation');
+  if (ocrConfirmEl) ocrConfirmEl.classList.add('d-none');
+
+  const btn = document.getElementById('scanBtn');
+  const btnText = document.getElementById('scanBtnText');
+  if (btn) btn.disabled = true; // Should be disabled until new images are uploaded
+  if (btnText) btnText.innerText = 'Upload Both Sides First';
+}
 
 /**
  * Server-side function to check if an ID is already registered under a different mobile number.
