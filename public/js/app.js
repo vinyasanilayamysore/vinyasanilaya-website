@@ -9,12 +9,13 @@ import {
   updateDoc, 
   serverTimestamp 
 } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
-import { ref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-storage.js";
+import { ref, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-storage.js";
 import { db, storage } from "./firebase-config.js";
 
 // Global Variables
 let currentStream = null;
 let selfieDataBase64 = null;
+let existingSelfieUrl = null;
 
 
 window.handlePreview = function(input, previewId) {
@@ -695,6 +696,9 @@ window.handleMobileSearch = async function() {
       const docSnapshot = querySnapshot.docs[0];
       const docData = docSnapshot.data();
 
+      // Capture existing selfie URL to allow cleanup if updated
+      existingSelfieUrl = docData.selfieUrl || null;
+
       console.log("✅ [Record Found] Document ID:", docSnapshot.id);
 
       const isExistingEl = document.getElementById('isExistingGuest');
@@ -742,6 +746,8 @@ window.handleMobileSearch = async function() {
     } else {
       // New User - Open Upload Sections
       console.log("ℹ️ [No Record Found] Opening ID Upload UI.");
+
+      existingSelfieUrl = null;
 
       const isExistingEl = document.getElementById('isExistingGuest');
       const welcomeMsg = document.getElementById('welcomeMsg');
@@ -1199,6 +1205,16 @@ window.finalSubmit = async function() {
     };
 
     if (isExisting && docId) {
+      // If a new selfie was captured, delete the old one from storage
+      if (selfieUrl && existingSelfieUrl) {
+        try {
+          const oldSelfieRef = ref(storage, existingSelfieUrl);
+          await deleteObject(oldSelfieRef);
+        } catch (storageErr) {
+          console.warn("Cleanup: Could not delete old selfie from storage:", storageErr);
+        }
+      }
+
       // Use dot notation to update specific fields without overwriting 
       // the entire verification object (preserving existing ID URLs)
       const updateData = {
