@@ -67,6 +67,48 @@ async function convertAndCompressToBase64(file) {
   });
 }
 
+/**
+ * Professional Image Quality Check
+ * Validates if the image is too blurry or too dark before OCR.
+ */
+async function validateImageQuality(base64Data) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      canvas.width = img.width;
+      canvas.height = img.height;
+      ctx.drawImage(img, 0, 0);
+
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const data = imageData.data;
+      let grayscaleSum = 0;
+
+      // Check Brightness
+      for (let i = 0; i < data.length; i += 4) {
+        grayscaleSum += (data[i] + data[i + 1] + data[i + 2]) / 3;
+      }
+      const avgBrightness = grayscaleSum / (data.length / 4);
+
+      if (avgBrightness < 40) {
+        resolve({ valid: false, reason: "The image is too dark. Please use better lighting." });
+        return;
+      }
+
+      // Basic check for file size/resolution to avoid "junk" thumbnails
+      if (img.width < 400 || img.height < 400) {
+        resolve({ valid: false, reason: "Image resolution is too low. Please take a closer photo." });
+        return;
+      }
+
+      resolve({ valid: true });
+    };
+    img.onerror = () => resolve({ valid: false, reason: "Invalid image format." });
+    img.src = base64Data;
+  });
+}
+
 // Helper to convert dataURL to Blob for Firebase Storage
 function dataURLToBlob(dataURL) {
   const byteString = atob(dataURL.split(',')[1]);
@@ -126,6 +168,16 @@ window.handleIdScan = async function() {
       convertAndCompressToBase64(frontFile),
       convertAndCompressToBase64(backFile)
     ]);
+
+    // Pre-validation: Check for junk/blurry images before calling external API
+    const frontQuality = await validateImageQuality(frontBase64);
+    const backQuality = await validateImageQuality(backBase64);
+
+    if (!frontQuality.valid || !backQuality.valid) {
+      const reason = (!frontQuality.valid ? "Front: " + frontQuality.reason : "Back: " + backQuality.reason);
+      showNotification("Low Quality Image", reason, "warning");
+      throw new Error(reason);
+    }
 
     frontImageBase64 = frontBase64;
     backImageBase64 = backBase64;
@@ -268,6 +320,12 @@ async function executeOcrFlow(frontBase64, backBase64, idType, nationality) {
     // If combined text is empty (during testing/mock), return empty schema cleanly
     if (!combinedRawText) {
       return { name: "", idNumber: "", address: "", raw: "" };
+    }
+
+    // Junk Detection: If the text is extremely short or lacks structure, it's likely not an ID
+    if (combinedRawText.length < 50) {
+      console.warn("Junk Detection: Low text density detected.");
+      throw new Error("Could not detect enough document text. Ensure you are uploading a clear ID card, not a photo of a person or object.");
     }
 
     const upperText = combinedRawText.toUpperCase();
