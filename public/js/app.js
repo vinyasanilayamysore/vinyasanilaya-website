@@ -261,13 +261,7 @@ window.handleIdScan = async function() {
     }, 200);
 
   } catch (err) {
-    if (btn) {
-      btn.disabled = false;
-      btn.className = "btn btn-indigo w-100 py-3 fw-bold mb-4 shadow-sm";
-      if (btnText) btnText.innerText = 'Verify & Scan Document Now';
-    }
     if (spinner) spinner.classList.add('d-none');
-    
     resetScanUI();
     showNotification(
       "Scan Failed", 
@@ -284,17 +278,29 @@ function resetScanUI() {
   frontImageBase64 = null;
   backImageBase64 = null;
 
+  // 1. Clear Preview Containers
   const frontPreview = document.getElementById('idFrontPreview');
   const backPreview = document.getElementById('idBackPreview');
   if (frontPreview) frontPreview.innerHTML = '';
   if (backPreview) backPreview.innerHTML = '';
 
+  // 2. Clear Actual File Inputs (Crucial to prevent re-processing old files)
+  ['idFrontFile', 'idFrontCamera', 'idBackFile', 'idBackCamera'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = "";
+  });
+
   const ocrConfirmEl = document.getElementById('ocrConfirmation');
   if (ocrConfirmEl) ocrConfirmEl.classList.add('d-none');
 
+  // 3. Reset Button State
   const btn = document.getElementById('scanBtn');
   const btnText = document.getElementById('scanBtnText');
-  if (btn) btn.disabled = true; // Should be disabled until new images are uploaded
+  if (btn) {
+    btn.disabled = true; // Should be disabled until new images are uploaded
+    btn.disabled = true;
+    btn.className = "btn btn-indigo w-100 py-3 fw-bold mb-4 shadow-sm opacity-50";
+  }
   if (btnText) btnText.innerText = 'Upload Both Sides First';
 }
 
@@ -343,7 +349,8 @@ async function checkIdMobileAssociation(extractedId, currentMobile) {
  * Calls backend to verify image matches expected document type tags.
  */
 async function classifyImage(base64Data) {
-  const cleanBase64 = base64Data.replace(/^data:image\/(png|jpeg|jpg);base64,/, "");
+  // Robustly strip Base64 prefix (case-insensitive, supports webp/jpeg/png)
+  const cleanBase64 = base64Data.replace(/^data:image\/(png|jpeg|jpg|webp);base64,/i, "");
   try {
     const response = await fetch('https://ocr-proxy-547333535578.asia-south1.run.app/classify', {
       method: 'POST',
@@ -351,7 +358,13 @@ async function classifyImage(base64Data) {
       body: JSON.stringify({ image: cleanBase64 })
     });
     if (!response.ok) throw new Error("Classification service unavailable");
-    return await response.json();
+    
+    const result = await response.json();
+    console.log("🔍 [AI Classifier Result]:", result);
+    if (typeof window.logToScreen === 'function') {
+      window.logToScreen('INFO', `AI Result: ${result.doc_type} (Valid: ${result.is_valid_id})`);
+    }
+    return result;
   } catch (error) {
     console.warn("Classifier fallback: ", error.message);
     // Fallback: allow processing if service is down, rely on OCR keywords later
@@ -365,7 +378,11 @@ async function classifyImage(base64Data) {
 function validateUploadedDocument(guestNationality, targetSlot, classification) {
   if (classification.doc_type === "unknown") return { success: true };
 
-  if (!classification.is_valid_id || classification.doc_type === "invalid") {
+  // Only block if the AI explicitly flags it as invalid or "invalid" tag.
+  // This prevents failures if the AI response is missing fields.
+  const isExplicitlyInvalid = classification.is_valid_id === false || classification.doc_type === "invalid";
+
+  if (isExplicitlyInvalid) {
     return { 
       success: false, 
       message: classification.rejection_reason || "This doesn't look like a valid ID card." 
