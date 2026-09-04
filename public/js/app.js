@@ -390,11 +390,11 @@ function validateUploadedDocument(guestNationality, targetSlot, classification) 
   }
 
   if (guestNationality === "IN") {
-    if (targetSlot === "front" && classification.doc_type !== "aadhaar_front") {
+    if (targetSlot === "front" && !["aadhaar_front", "aadhaar"].includes(classification.doc_type)) {
       return { success: false, message: "Please upload the Front side of your Aadhaar Card." };
     }
-    if (targetSlot === "back" && classification.doc_type !== "aadhaar_back") {
-      return { success: false, message: "Please upload the Back side of your Aadhaar (containing QR code)." };
+    if (targetSlot === "back" && !["aadhaar_back", "aadhaar"].includes(classification.doc_type)) {
+      return { success: false, message: "Please upload the Back side of your Aadhaar (containing QR code for verification)." };
     }
   } else {
     if (classification.doc_type !== "passport") {
@@ -452,7 +452,7 @@ async function executeOcrFlow(frontBase64, backBase64, idType, nationality) {
     }
 
     const upperText = combinedRawText.toUpperCase();
-    const idKeywords = ["GOVERNMENT", "INDIA", "INCOME TAX", "ELECTION", "DRIVING", "LICENSE", "ID", "CARD", "UNIQUE", "PASSPORT", "REPUBLIC"];
+    const idKeywords = ["GOVERNMENT", "INDIA", "INCOME TAX", "ELECTION", "DRIVING", "LICENSE", "ID", "CARD", "UNIQUE", "PASSPORT", "REPUBLIC", "AADHAAR", "AADHAR", "UIDAI"];
     const hasIdKeywords = idKeywords.some(keyword => upperText.includes(keyword));
 
     if (!hasIdKeywords) {
@@ -497,7 +497,7 @@ function parseAadhaarData(rawText) {
   const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 1);
   const standardizedText = rawText.replace(/[x*×K]/g, 'X');
 
-  const idRegex = /(\b[X\d]{4}\s[X\d]{4}\s\d{4}\b)|(\b\d{4}\b$)/gm;
+  const idRegex = /([X\d]{4}\s+[X\d]{4}\s+\d{4})|([X\d]{12})|(\b\d{4}\b$)/gm;
   const matches = standardizedText.match(idRegex) || [];
   let idNumber = "";
   let fallbackId = "";
@@ -539,7 +539,7 @@ function parseAadhaarData(rawText) {
     "WWW.", "HELP@", "ELITEBOOK", "LATITUDE", "THINKPAD", "MACBOOK", "HP", "DELL",
     "AADHAAR", "NUMBER", "NO."
   ];
-  const searchLimit = Math.floor(lines.length * 0.4);
+  const searchLimit = Math.floor(lines.length * 0.6);
 
   for (let i = 0; i < lines.length; i++) {
     let englishOnlyLine = lines[i].replace(/[^\x00-\x7F]/g, "").trim();
