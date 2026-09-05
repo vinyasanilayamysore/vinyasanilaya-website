@@ -975,7 +975,10 @@ window.handleMobileSearch = async function() {
       if (idUploadSec) idUploadSec.classList.add('d-none');
       if (ocrConfirm) ocrConfirm.classList.remove('d-none');
 
-      if (typeof toggleSecondarySections === 'function') toggleSecondarySections(true);
+      // Reset verification checkbox and ensure secondary sections are hidden until confirmed
+      const detailsVerifiedEl = document.getElementById('detailsVerified');
+      if (detailsVerifiedEl) detailsVerifiedEl.checked = false;
+      if (typeof toggleSecondarySections === 'function') toggleSecondarySections(false);
 
       if (typeof window.logToScreen === 'function') {
         window.logToScreen('INFO', `Pre-populated existing record for ${guestName} (${docSnapshot.id})`);
@@ -1673,6 +1676,17 @@ document.addEventListener('DOMContentLoaded', function() {
       console.log("🖱️ Search button clicked. Executing handleMobileSearch...");
       if (typeof window.handleMobileSearch === 'function') {
         window.handleMobileSearch();
+      }
+    });
+  }
+
+  // --- 3. IDENTITY VERIFICATION CHECKBOX LISTENER ---
+  // Ensures Emergency and Travel sections only appear after ID details are confirmed
+  const detailsVerified = document.getElementById('detailsVerified');
+  if (detailsVerified) {
+    detailsVerified.addEventListener('change', function() {
+      if (typeof toggleSecondarySections === 'function') {
+        toggleSecondarySections(this.checked);
       }
     });
   }
