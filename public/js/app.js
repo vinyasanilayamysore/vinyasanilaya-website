@@ -301,9 +301,8 @@ async function executeOcrFlow(frontBase64, backBase64, idType, nationality) {
 
     const combinedRawText = `${frontText}\n${backText}`.trim();
 
-    // If combined text is empty (during testing/mock), return empty schema cleanly
-    if (!combinedRawText) {
-      return { name: "", idNumber: "", address: "", raw: "" };
+    if (!combinedRawText || combinedRawText.length < 20) {
+      throw new Error("Not a correct ID proof. No readable text detected. Please upload clear photos of your Govt ID and ensure it is not a selfie.");
     }
 
     const upperText = combinedRawText.toUpperCase();
