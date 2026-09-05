@@ -184,6 +184,21 @@ window.handleIdScan = async function() {
       if (btnText) btnText.innerText = 'Verify & Scan Document Now';
     }
     if (spinner) spinner.classList.add('d-none');
+
+    // Reset ID inputs and global Base64 holders if scan/validation fails
+    ['idFrontFile', 'idFrontCamera', 'idBackFile', 'idBackCamera'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.value = '';
+    });
+    frontImageBase64 = null;
+    backImageBase64 = null;
+
+    // Reset Preview Boxes to original instructional state
+    const frontPreview = document.getElementById('idFrontPreview');
+    const backPreview = document.getElementById('idBackPreview');
+    if (frontPreview) frontPreview.innerHTML = '<div class="py-4 text-muted"><i class="bi bi-card-image fs-1 d-block mb-2"></i>FRONT SIDE</div>';
+    if (backPreview) backPreview.innerHTML = '<div class="py-4 text-muted"><i class="bi bi-card-image fs-1 d-block mb-2"></i>BACK SIDE</div>';
+
     updateScanButtonState();
     showNotification("Scan Failed", err.message || "Could not read ID details. Please try with clearer photos.", "error");
   }
@@ -271,7 +286,17 @@ async function executeOcrFlow(frontBase64, backBase64, idType, nationality) {
     }
 
     const upperText = combinedRawText.toUpperCase();
-    const idKeywords = ["GOVERNMENT", "INDIA", "INCOME TAX", "ELECTION", "DRIVING", "LICENSE", "ID", "CARD", "UNIQUE", "PASSPORT", "REPUBLIC"];
+
+    // Specific Aadhaar Verification Check
+    if (idType === "Aadhaar") {
+      const hasAadhaarKeyword = upperText.includes("AADHAAR") || upperText.includes("AADHAR");
+      
+      if (!hasAadhaarKeyword) {
+        throw new Error("Aadhaar keyword not detected in uploaded images. Please upload a valid Aadhaar card (Front & Back).");
+      }
+    }
+
+    const idKeywords = ["GOVERNMENT", "INDIA", "INCOME TAX", "ELECTION", "DRIVING", "LICENSE", "ID", "CARD", "UNIQUE", "PASSPORT", "REPUBLIC", "AADHAAR", "AADHAR"];
     const hasIdKeywords = idKeywords.some(keyword => upperText.includes(keyword));
 
     if (!hasIdKeywords) {
