@@ -206,42 +206,52 @@ window.handleIdScan = async function() {
 
 
 /**
- * Server-side function to check if an ID is already registered under a different mobile number.
+ * Checks if an extracted document ID is already tied to a different guest phone number.
+ * 
+ * @param {string} extractedId - The ID number extracted by OCR
+ * @param {string} currentMobile - The phone number entered during registration
+ * @returns {Promise<{conflict: boolean, existingName?: string, existingMobile?: string}>}
  */
 async function checkIdMobileAssociation(extractedId, currentMobile) {
-  // Clean inputs
-  const searchId = String(extractedId || '').replace(/[\s-]/g, '').toUpperCase();
-  // Normalize to last 10 digits for consistent comparison
+  if (!extractedId) {
+    return { conflict: false };
+  }
+
+  // 1. Sanitize inputs
+  const cleanIdStr = String(extractedId).trim();
+  const searchId = cleanIdStr.replace(/[\s-]/g, '').toUpperCase();
   const searchMobile = String(currentMobile || '').replace(/\D/g, '').slice(-10);
 
-  // 1. Skip if ID is empty or redacted to avoid false positives
+  // 2. Ignore empty or redacted placeholder IDs to prevent false conflicts
   if (!searchId || searchId.includes("REDACTED") || searchId === "") {
     return { conflict: false };
   }
 
   try {
-    // 2. Query your database for an existing guest with this ID
+    // 3. Query the 'guests' collection matching the ID field
     const guestsRef = collection(db, "guests");
     const q = query(guestsRef, where("verification.idNo", "==", searchId));
     const querySnapshot = await getDocs(q);
 
     if (!querySnapshot.empty) {
+      // Document found; check associated mobile number
       const existingGuest = querySnapshot.docs[0].data();
       const existingMobile = String(existingGuest.guestDetails?.phone || '').replace(/\D/g, '').slice(-10);
 
-      // 3. Flag conflict if mobile numbers don't match
+      // 4. Return conflict if registered under a different mobile number
       if (existingMobile !== searchMobile && searchMobile !== "") {
         return {
           conflict: true,
-          existingName: existingGuest.guestDetails?.name,
-          existingMobile: existingGuest.guestDetails?.phone
+          existingName: existingGuest.guestDetails?.name || "Existing Guest",
+          existingMobile: existingGuest.guestDetails?.phone || ""
         };
       }
     }
 
     return { conflict: false };
   } catch (error) {
-    console.error("Conflict check error:", error);
+    console.error("Error executing guest ID conflict query:", error);
+    // Return no conflict in error state to avoid blocking workflow, or handle error according to your app logic
     return { conflict: false };
   }
 }
