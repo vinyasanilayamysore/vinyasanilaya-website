@@ -6,7 +6,8 @@ import {
   getDocs, 
   addDoc, 
   doc, 
-  updateDoc, 
+  updateDoc,
+  deleteField,
   serverTimestamp 
 } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
 import { ref, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-storage.js";
@@ -1451,7 +1452,8 @@ window.finalSubmit = async function() {
     const payload = {
       guestDetails: {
         name: (document.getElementById('name')?.value || "").trim(),
-        phone: phone
+        phone: phone,
+        ...(selfieUrl && { selfieUrl })
       },
       verification: {
         idType: idType,
@@ -1471,7 +1473,6 @@ window.finalSubmit = async function() {
         purpose: document.getElementById('purpose').value
       },
       verifiedStatus: "Verified",
-      ...(selfieUrl && { selfieUrl }),
       updatedAt: serverTimestamp()
     };
 
@@ -1498,10 +1499,11 @@ window.finalSubmit = async function() {
         "emergencyContact": payload.emergencyContact,
         "travelDetails": payload.travelDetails,
         "verifiedStatus": payload.verifiedStatus,
-        "updatedAt": payload.updatedAt
+        "updatedAt": payload.updatedAt,
+        "selfieUrl": deleteField() // Explicitly remove the legacy root-level field
       };
 
-      if (selfieUrl) updateData.selfieUrl = selfieUrl;
+      if (selfieUrl) updateData["guestDetails.selfieUrl"] = selfieUrl;
       
       // Only update ID URLs if new ones were actually uploaded
       if (idFrontUrl) updateData["verification.idFrontUrl"] = idFrontUrl;
