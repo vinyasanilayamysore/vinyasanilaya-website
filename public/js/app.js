@@ -373,39 +373,31 @@ function parseAadhaarData(rawText) {
     "AADHAAR", "NUMBER", "NO.", "ISSUE", "DATE", "GOVERNMENT OF INDIA", "BHARAT"
   ];
 
-  // Helper function: Validate if a line is a real English name (including initials like 'M D' or 'M.D.')
-function isValidNameString(str) {
-  if (!str || str.length < 2) return false;
+  // Helper function: Validate if a line is a real English name
+  function isValidNameString(str) {
+    if (!str || str.length < 2) return false;
 
-  // 1. Strip non-ASCII characters
-  const cleanStr = str.replace(/[^\x00-\x7F]/g, "").trim();
-  if (!/^[A-Za-z\s.]+$/.test(cleanStr)) return false;
+    const cleanStr = str.replace(/[^\x00-\x7F]/g, "").trim();
+    if (!/^[A-Za-z\s.]+$/.test(cleanStr)) return false;
 
-  const uStr = cleanStr.toUpperCase();
+    const uStr = cleanStr.toUpperCase();
 
-  // 2. Filter system noise and labels
-  if (noiseKeywords.some(word => uStr.includes(word))) return false;
-  if (/\d/.test(cleanStr)) return false;
-  if (/S\/O|D\/O|W\/O|SON OF|DAUGHTER OF|WIFE OF/i.test(uStr)) return false;
+    if (noiseKeywords.some(word => uStr.includes(word))) return false;
+    if (/\d/.test(cleanStr)) return false;
+    if (/S\/O|D\/O|W\/O|SON OF|DAUGHTER OF|WIFE OF/i.test(uStr)) return false;
 
-  const words = cleanStr.split(/\s+/).filter(w => w.length > 0);
+    const words = cleanStr.split(/\s+/).filter(w => w.length > 0);
 
-  // 3. Reject OCR garbage generated from regional script
-  // Common Kannada OCR artifacts produce strings like "Jnavr", "wear", "wo", "woa", "dwo"
-  const ocrGarbageRegex = /\b(jnavr|wear|wo|woa|dwo|eaar|jne|vnay)\b/i;
-  if (ocrGarbageRegex.test(cleanStr)) return false;
+    const ocrGarbageRegex = /\b(jnavr|wear|wo|woa|dwo|eaar|jne|vnay)\b/i;
+    if (ocrGarbageRegex.test(cleanStr)) return false;
 
-  // 4. Reject improbable English phonetic starts (e.g., "Jn...")
-  const invalidLetterClusters = /\b(jn|yx|qj|xj|zg|vj)\w+/i;
-  if (invalidLetterClusters.test(cleanStr)) return false;
+    const invalidLetterClusters = /\b(jn|yx|qj|xj|zg|vj)\w+/i;
+    if (invalidLetterClusters.test(cleanStr)) return false;
 
-  // 5. Must contain at least one valid core name word (3+ chars)
-  const hasCoreNameWord = words.some(w => /^[A-Za-z]{3,}$/.test(w));
+    return words.some(w => /^[A-Za-z]{3,}$/.test(w));
+  }
 
-  return hasCoreNameWord;
-}
-
-  // Strategy A: Locate DOB / Gender anchor line and scan upwards
+  // Locate DOB / Gender anchor line and scan upwards
   let anchorIndex = -1;
   for (let i = 0; i < lines.length; i++) {
     const uLine = lines[i].toUpperCase();
@@ -417,15 +409,11 @@ function isValidNameString(str) {
 
   if (anchorIndex > 0) {
     let collectedNameParts = [];
-
-    // Scan up to 5 lines prior to anchor
     for (let i = anchorIndex - 1; i >= Math.max(0, anchorIndex - 5); i--) {
       let candidate = lines[i].replace(/[^\x00-\x7F]/g, "").trim();
-
       if (isValidNameString(candidate)) {
         collectedNameParts.unshift(candidate);
       } else if (collectedNameParts.length > 0) {
-        // Stop scanning only once we've already found a valid name and then hit a non-name line
         break;
       }
     }
@@ -435,7 +423,6 @@ function isValidNameString(str) {
     }
   }
 
-  // Strategy B: Fallback scan if anchor line was not found or failed
   if (detectedName === "Not found") {
     const searchLimit = Math.floor(lines.length * 0.6);
     for (let i = 0; i < searchLimit; i++) {
@@ -447,48 +434,66 @@ function isValidNameString(str) {
     }
   }
 
-  // 3. Address Extraction
+  // 3. Precise Address Extraction Logic
   let detectedAddress = "Not found";
-  let capturingAddress = false;
   let addressLines = [];
+  let capturingAddress = false;
+
+  const stopKeywords = [
+    "KARNATAKA", "PIN", "INDIA", "UG", "YOUR AADHAAR", "AADHAAR NO", 
+    "WWW.", "UNIQUE", "HELP", "1947", "UIDAI", "GOVERNMENT OF INDIA"
+  ];
 
   for (let i = 0; i < lines.length; i++) {
     let englishOnlyLine = lines[i].replace(/[^\x00-\x7F]/g, "").trim();
     const upperLine = englishOnlyLine.toUpperCase();
 
-    const isAddressLabel = upperLine.includes("ADDRESS");
-    const isRelationTrigger = upperLine.includes("S/O") || upperLine.includes("D/O") || upperLine.includes("W/O");
+    // Trigger capture when hitting explicit house # or street identifiers
+    const isHouseOrStreetLine = /#\s*\d+|NO\.\s*\d+|\b\d+(ST|ND|RD|TH)\b|MAIN ROAD|BLOCK|CROSS|LAYOUT|STREET|NAGAR/i.test(englishOnlyLine);
+    const isAddressHeader = upperLine.includes("ADDRESS");
 
-    if (isAddressLabel || isRelationTrigger) {
-      if (capturingAddress) { addressLines = []; }
+    if ((isHouseOrStreetLine || isAddressHeader) && addressLines.length === 0) {
       capturingAddress = true;
 
+      // Clean prefix if starting line contains "Address:" or relationship terms
       let startText = englishOnlyLine.replace(/Address[:\s]*/i, "").trim();
+      startText = startText.replace(/^(S\/O|D\/O|W\/O)[:\s]*[A-Za-z\s,.-]+/i, "").trim();
       startText = startText.replace(/^[:,\s\d]+/, "").trim();
 
-      if (startText.replace(/[^a-zA-Z]/g, "").length > 3) {
+      if (startText.length > 3) {
         addressLines.push(startText);
       }
       continue;
     }
 
     if (capturingAddress) {
-      const isFooter = ["WWW.", "UNIQUE", "HELP", "1947", "UIDAI"].some(word => upperLine.includes(word));
+      // Exit triggers: stop at postal tracking codes, phone numbers, state/pin lines, or Aadhaar headers
+      const isTrackingCode = /[A-Z]{2}\d{9}[A-Z]{2}/i.test(englishOnlyLine);
+      const isPhoneNumber = /^\d{10}$/.test(englishOnlyLine.replace(/\s/g, ''));
+      const isPinOrState = /\b\d{6}\b/.test(englishOnlyLine) || stopKeywords.some(word => upperLine.includes(word));
       const isIdRepeat = idNumber && englishOnlyLine.replace(/\s/g, '').includes(idNumber.replace(/\s/g, '').slice(-4));
 
-      if (isFooter || isIdRepeat) {
+      if (isTrackingCode || isPhoneNumber || isPinOrState || isIdRepeat) {
         capturingAddress = false;
-      } else {
-        if (englishOnlyLine.replace(/[^a-zA-Z]/g, "").length > 3) {
-          addressLines.push(englishOnlyLine);
-        }
+        break; // Stop scanning once the main address block is captured
+      }
+
+      // Skip remaining relationship tags if encountered
+      if (/^(S\/O|D\/O|W\/O|SON OF|DAUGHTER OF|WIFE OF)/i.test(upperLine)) {
+        continue;
+      }
+
+      if (englishOnlyLine.replace(/[^a-zA-Z0-9]/g, "").length > 3) {
+        addressLines.push(englishOnlyLine);
       }
     }
   }
 
   if (addressLines.length > 0) {
-    detectedAddress = addressLines.join(", ").replace(/,\s*,/g, ",").trim();
-    detectedAddress = detectedAddress.replace(/^(Address|S\/O|D\/O|W\/O)\s+\1/i, "$1");
+    detectedAddress = addressLines.join(", ")
+      .replace(/,\s*,/g, ",")
+      .replace(/^[\s,:-]+/, "")
+      .trim();
   }
 
   return { name: detectedName, idNumber: idNumber || "", address: detectedAddress, raw: rawText };
