@@ -222,6 +222,8 @@ async function checkIdMobileAssociation(extractedId, currentMobile) {
   const searchId = cleanIdStr.replace(/[\s-]/g, '').toUpperCase();
   const searchMobile = String(currentMobile || '').replace(/\D/g, '').slice(-10);
 
+  console.log(`🔍 [Conflict Check] Sanitized Search ID: ${searchId}, Sanitized Mobile: ${searchMobile}`);
+
   // 2. Ignore empty or redacted placeholder IDs to prevent false conflicts
   if (!searchId || searchId.includes("REDACTED") || searchId === "") {
     return { conflict: false };
@@ -234,12 +236,16 @@ async function checkIdMobileAssociation(extractedId, currentMobile) {
     const querySnapshot = await getDocs(q);
 
     if (!querySnapshot.empty) {
+      console.log(`✅ [Conflict Check] Record found in Firestore for ID: ${searchId}`);
       // Document found; check associated mobile number
       const existingGuest = querySnapshot.docs[0].data();
       const existingMobile = String(existingGuest.guestDetails?.phone || '').replace(/\D/g, '').slice(-10);
 
+      console.log(`🧐 [Conflict Check] Comparing input mobile (${searchMobile}) with existing mobile (${existingMobile})`);
+
       // 4. Return conflict if registered under a different mobile number
       if (existingMobile !== searchMobile && searchMobile !== "") {
+        console.warn(`⚠️ [Conflict Check] Conflict detected! This ID is registered to ${existingGuest.guestDetails?.name || 'another guest'}.`);
         return {
           conflict: true,
           existingName: existingGuest.guestDetails?.name || "Existing Guest",
@@ -248,6 +254,7 @@ async function checkIdMobileAssociation(extractedId, currentMobile) {
       }
     }
 
+    console.log("🟢 [Conflict Check] No conflict found or mobile numbers match.");
     return { conflict: false };
   } catch (error) {
     console.error("Error executing guest ID conflict query:", error);
