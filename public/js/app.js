@@ -415,9 +415,7 @@ function parseAadhaarData(rawText) {
 
       const isNoise = noiseKeywords.some(word => uCand.includes(word));
       const hasNumbers = /\d/.test(candidate);
-      const words = candidate.split(/\s+/);
-      const validEnglishWords = words.filter(w => /^[A-Za-z]{2,}$/.test(w));
-      const isCleanEnglishName = validEnglishWords.length > 0 && /^[A-Za-z\s.]+$/.test(candidate);
+      const isCleanEnglishName = /^[A-Za-z][A-Za-z\s.]+$/.test(candidate) && candidate.length > 3;
 
       if (isCleanEnglishName && !isNoise && !hasNumbers) {
         detectedName = candidate;
