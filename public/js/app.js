@@ -365,7 +365,25 @@ function parseAadhaarData(rawText) {
     "AADHAAR", "NUMBER", "NO.", "ISSUE", "DATE", "GOVERNMENT OF INDIA", "BHARAT"
   ];
 
-  // Strategy A: Locate DOB / Gender anchor line and scan upward
+  // Helper function: Validate if a line is a real English name (including initials like 'M D' or 'M.D.')
+  function isValidNameString(str) {
+    if (!str || str.length < 2) return false;
+    const cleanStr = str.replace(/[^\x00-\x7F]/g, "").trim();
+    if (!/^[A-Za-z\s.]+$/.test(cleanStr)) return false;
+
+    const uStr = cleanStr.toUpperCase();
+    if (noiseKeywords.some(word => uStr.includes(word))) return false;
+    if (/\d/.test(cleanStr)) return false;
+    if (/S\/O|D\/O|W\/O|SON OF|DAUGHTER OF|WIFE OF/i.test(uStr)) return false;
+
+    // Must contain at least one real word with 3+ letters (e.g. "Vinaydev", "Ram", "Yaswanth")
+    const words = cleanStr.split(/\s+/).filter(w => w.length > 0);
+    const hasCoreNameWord = words.some(w => /^[A-Za-z]{3,}$/.test(w));
+
+    return hasCoreNameWord;
+  }
+
+  // Strategy A: Locate DOB / Gender anchor line and scan upwards
   let anchorIndex = -1;
   for (let i = 0; i < lines.length; i++) {
     const uLine = lines[i].toUpperCase();
@@ -378,25 +396,14 @@ function parseAadhaarData(rawText) {
   if (anchorIndex > 0) {
     let collectedNameParts = [];
 
-    // Look back up to 5 lines prior to anchor to handle intervening regional OCR noise or multi-line names
+    // Scan up to 5 lines prior to anchor
     for (let i = anchorIndex - 1; i >= Math.max(0, anchorIndex - 5); i--) {
-      // Strip non-ASCII/regional characters and whitespace
       let candidate = lines[i].replace(/[^\x00-\x7F]/g, "").trim();
-      let uCand = candidate.toUpperCase();
 
-      const isNoise = noiseKeywords.some(word => uCand.includes(word));
-      const hasNumbers = /\d/.test(candidate);
-      const isRelation = /S\/O|D\/O|W\/O|SON OF|DAUGHTER OF|WIFE OF/i.test(uCand);
-
-      // Check for valid English words (at least 2 consecutive letters, no isolated gibberish)
-      const words = candidate.split(/\s+/);
-      const validEnglishWords = words.filter(w => /^[A-Za-z]{2,}$/.test(w));
-      const isCleanEnglishName = validEnglishWords.length > 0 && /^[A-Za-z\s.]+$/.test(candidate);
-
-      if (isCleanEnglishName && !isNoise && !hasNumbers && !isRelation) {
+      if (isValidNameString(candidate)) {
         collectedNameParts.unshift(candidate);
       } else if (collectedNameParts.length > 0) {
-        // Stop scanning once contiguous English name block ends
+        // Stop scanning only once we've already found a valid name and then hit a non-name line
         break;
       }
     }
@@ -411,13 +418,7 @@ function parseAadhaarData(rawText) {
     const searchLimit = Math.floor(lines.length * 0.6);
     for (let i = 0; i < searchLimit; i++) {
       let candidate = lines[i].replace(/[^\x00-\x7F]/g, "").trim();
-      let uCand = candidate.toUpperCase();
-
-      const isNoise = noiseKeywords.some(word => uCand.includes(word));
-      const hasNumbers = /\d/.test(candidate);
-      const isCleanEnglishName = /^[A-Za-z][A-Za-z\s.]+$/.test(candidate) && candidate.length > 3;
-
-      if (isCleanEnglishName && !isNoise && !hasNumbers) {
+      if (isValidNameString(candidate)) {
         detectedName = candidate;
         break;
       }
