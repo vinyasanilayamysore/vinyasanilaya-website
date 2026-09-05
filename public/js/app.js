@@ -1353,9 +1353,11 @@ async function uploadAsset(base64Data, phone, idType, side = "") {
   const now = new Date();
   const formattedDate = now.toISOString().split('T')[0];
   const timestamp = now.getTime(); // Ensure uniqueness to prevent collision/accidental deletion
-  const fileName = side 
-    ? `${formattedDate}-${phone}-${idType}-${side}-${timestamp}.jpg`
-    : `${formattedDate}-${phone}-${idType}-${timestamp}.jpg`;
+  const fileName = (idType === "Selfie")
+    ? `${formattedDate}-${phone}-Selfie.jpg`
+    : (side 
+        ? `${formattedDate}-${phone}-${idType}-${side}-${timestamp}.jpg`
+        : `${formattedDate}-${phone}-${idType}-${timestamp}.jpg`);
 
   const storageRef = ref(storage, `${folderPath}/${fileName}`);
   const blob = dataURLToBlob(base64Data);
@@ -1478,7 +1480,7 @@ window.finalSubmit = async function() {
 
     if (isExisting && docId) {
       // If a new selfie was captured, delete the old one from storage
-      if (selfieUrl && existingSelfieUrl) {
+      if (selfieUrl && existingSelfieUrl && selfieUrl !== existingSelfieUrl) {
         try {
           const oldSelfieRef = ref(storage, existingSelfieUrl);
           await deleteObject(oldSelfieRef);
