@@ -211,7 +211,8 @@ window.handleIdScan = async function() {
 async function checkIdMobileAssociation(extractedId, currentMobile) {
   // Clean inputs
   const searchId = String(extractedId || '').replace(/[\s-]/g, '').toUpperCase();
-  const searchMobile = String(currentMobile || '').replace(/[\s-+\d]{0,2}/, '').trim();
+  // Normalize to last 10 digits for consistent comparison
+  const searchMobile = String(currentMobile || '').replace(/\D/g, '').slice(-10);
 
   // 1. Skip if ID is empty or redacted to avoid false positives
   if (!searchId || searchId.includes("REDACTED") || searchId === "") {
@@ -226,7 +227,7 @@ async function checkIdMobileAssociation(extractedId, currentMobile) {
 
     if (!querySnapshot.empty) {
       const existingGuest = querySnapshot.docs[0].data();
-      const existingMobile = String(existingGuest.guestDetails?.phone || '').replace(/[\s-+\d]{0,2}/, '').trim();
+      const existingMobile = String(existingGuest.guestDetails?.phone || '').replace(/\D/g, '').slice(-10);
 
       // 3. Flag conflict if mobile numbers don't match
       if (existingMobile !== searchMobile && searchMobile !== "") {
@@ -1346,6 +1347,21 @@ window.finalSubmit = async function() {
   const isExisting = document.getElementById('isExistingGuest').value === "true";
   const docId = document.getElementById('rowNumber').value;
   const idType = document.getElementById('idType').value || 'Aadhaar';
+
+  // Safety check: Final verification against ID duplicates
+  const finalIdNo = (document.getElementById('idNumber')?.value || "").trim();
+  const conflictCheck = await checkIdMobileAssociation(finalIdNo, phone);
+  
+  if (conflictCheck && conflictCheck.conflict) {
+    showNotification(
+      "Security Alert", 
+      `This identification number is already recorded under another profile (${conflictCheck.existingName || 'Existing Guest'}). Please use your registered mobile number or correct the ID.`, 
+      "error"
+    );
+    submitBtn.disabled = false;
+    submitBtn.innerText = "Complete Check-in";
+    return;
+  }
 
   // Safety check: Ensure new guests have captured all required images
   if (!isExisting && (!frontImageBase64 || !backImageBase64 || !selfieDataBase64)) {
