@@ -163,7 +163,7 @@ window.handleIdScan = async function() {
 
     document.getElementById('name').value = (res.name && res.name !== "Not found") ? res.name : "";
     document.getElementById('idNumber').value = res.idNumber || "";
-    document.getElementById('address').value = res.address || "";
+    document.getElementById('address').value = (res.address && res.address !== "Not found") ? res.address : "";
 
     if (spinner) spinner.classList.add('d-none');
     if (btn) {
@@ -292,7 +292,7 @@ async function executeOcrFlow(frontBase64, backBase64, idType, nationality) {
       const hasAadhaarKeyword = upperText.includes("AADHAAR") || upperText.includes("AADHAR");
       
       if (!hasAadhaarKeyword) {
-        throw new Error("Aadhaar keyword not detected in uploaded images. Please upload a valid Aadhaar card (Front & Back).");
+        throw new Error("Aadhaar card not recognized. Please upload clear, well-lit images of both the front and back sides for verification.");
       }
     }
 
@@ -300,7 +300,7 @@ async function executeOcrFlow(frontBase64, backBase64, idType, nationality) {
     if (idType === "Passport") {
       const hasPassportIndicator = upperText.includes("PASSPORT") || upperText.includes("पासपोर्ट") || upperText.includes("REPUBLIC") || /P<[A-Z0-9<]+/i.test(upperText) || upperText.includes("FILE NO");
       if (!hasPassportIndicator) {
-        throw new Error("Passport indicators not detected. Please upload a clear image of your Passport (Bio-data or Back page).");
+        throw new Error("Passport not recognized. Please upload clear, well-lit images of your bio-data page and address page for verification.");
       }
     }
 
@@ -873,11 +873,15 @@ window.handleMobileSearch = async function() {
       // Populate UI fields
       const guestName = docData.guestDetails?.name || '';
       const idNo = docData.verification?.idNo || '';
+      const guestAddress = docData.verification?.address || '';
 
       const nameEl = document.getElementById('name');
       const idNumEl = document.getElementById('idNumber');
+      const addrEl = document.getElementById('address');
+
       if (nameEl) nameEl.value = guestName;
       if (idNumEl) idNumEl.value = idNo;
+      if (addrEl) addrEl.value = guestAddress;
 
       if (docData.emergencyContact) {
         const emName = document.getElementById('emergencyName');
@@ -1350,6 +1354,7 @@ window.finalSubmit = async function() {
       verification: {
         idType: idType,
         idNo: (document.getElementById('idNumber')?.value || "").trim(),
+        address: (document.getElementById('address')?.value || "").trim(),
         verified: document.getElementById('detailsVerified')?.checked || false,
         // Newly uploaded ID URLs are now stored here
         ...(idFrontUrl && { idFrontUrl }),
@@ -1386,6 +1391,7 @@ window.finalSubmit = async function() {
         "guestDetails.phone": payload.guestDetails.phone,
         "verification.idType": payload.verification.idType,
         "verification.idNo": payload.verification.idNo,
+        "verification.address": payload.verification.address,
         "verification.verified": payload.verification.verified,
         "emergencyContact": payload.emergencyContact,
         "travelDetails": payload.travelDetails,
