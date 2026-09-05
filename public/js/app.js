@@ -627,7 +627,12 @@ function parseDrivingLicenseData(combinedText) {
 function parsePassportData(rawText, pageType = "auto") {
   const upperRawText = rawText.toUpperCase();
 
-  // 1. Strict Disqualification for Non-Passport Documents (DL, National IDs, Tax IDs)
+  // Helper function to check if string contains any of the keywords
+  function upperRuleIncludesAny(text, keywords) {
+    return keywords.some(kw => text.includes(kw));
+  }
+
+  // 1. Strict Disqualification for Non-Passport Documents (DL, Aadhaar, Voter)
   const nonPassportKeywords = [
     "DRIVING LICENCE", "DRIVING LICENSE", "MOTOR VEHICLE", "UNION MOTOR", 
     "TRANSPORT DEPARTMENT", "DL NO", "DL NUMBER", "AUTHORITY TO DRIVE",
@@ -643,23 +648,22 @@ function parsePassportData(rawText, pageType = "auto") {
   const containsPassportWord = upperRawText.includes("PASSPORT") || upperRawText.includes("पासपोर्ट");
   const containsRepublicOf = upperRawText.includes("REPUBLIC OF INDIA") || upperRawText.includes("REPUBLIC OF");
   
-  // Specific Back Page Check (Indian Passport Back Page structure)
+  // Back Page Check (Indian Passport Structure)
   const isPassportBackPage = (
     (upperRawText.includes("FILE NO") || upperRuleIncludesAny(upperRawText, ["NAME OF FATHER", "NAME OF MOTHER", "NAME OF SPOUSE"])) &&
-    (upperRawText.includes("ADDRESS") || upperRawText.includes("OLD PASSPORT"))
+    (upperRawText.includes("ADDRESS") || upperRawText.includes("OLD PASSPORT") || upperRawText.includes("पता"))
   );
 
   const isValidPassportDoc = !containsForbiddenKeyword && (hasMRZ || containsPassportWord || containsRepublicOf || isPassportBackPage);
 
-  // Reject non-passport documents immediately
   if (!isValidPassportDoc) {
     if (containsForbiddenKeyword) {
-      throw new Error("The uploaded document appears to be a different type of identity card (Aadhaar/DL/Voter). Please upload your Passport page.");
+      throw new Error("The uploaded document appears to be a different type of identity card. Please upload your Passport page.");
     }
     throw new Error("Invalid Passport document. Passport keywords or MRZ data not detected. Please try again with a clearer photo.");
   }
 
-  // --- Proceed with Parsing Valid Passport Document ---
+  // --- Proceed with Parsing ---
   const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
 
   let extractedData = {
@@ -687,25 +691,37 @@ function parsePassportData(rawText, pageType = "auto") {
     extractedData.idNumber = mrzLine2Match[1].replace(/</g, "");
   }
 
-  // 4. Visual Label Extractions & Fallbacks
-  const headers = ["SURNAME", "GIVEN NAME", "NAME", "दिया गया नाम", "उपनाम", "PASSPORT"];
-  const ignoredWords = ["PASSPORT", "INDIAN", "REPUBLIC", "COUNTRY", "NATIONALITY", "SURNAME", "GIVEN", "DETAILS", "DRIVING", "LICENCE"];
+  // 4. Fallback/Visual Label Passport ID Extraction
+  if (!extractedData.idNumber) {
+    // Scan explicit labels first
+    for (let line of lines) {
+      const upperLine = line.toUpperCase();
+      if (upperLine.includes("PASSPORT NO") || upperLine.includes("PASSPORT") || upperLine.includes("पासपोर्ट")) {
+        let val = line.split(/[:/|-]/).pop().trim();
+        let candidate = val.match(/\b[A-PR-WYA-Z][0-9]{7}\b/i);
+        if (candidate) {
+          extractedData.idNumber = candidate[0].toUpperCase();
+          break;
+        }
+      }
+    }
+    // General regex scan if label missed
+    if (!extractedData.idNumber) {
+      const allMatches = rawText.match(/\b[A-PR-WYA-Z][0-9]{7}\b/gi) || [];
+      if (allMatches.length > 0) {
+        extractedData.idNumber = allMatches[0].toUpperCase();
+      }
+    }
+  }
 
+  // 5. Visual Label Extractions (Name & Address)
+  const headers = ["SURNAME", "GIVEN NAME", "NAME", "दिया गया नाम", "उपनाम", "PASSPORT"];
   let capturingAddress = false;
   let addressLines = [];
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const upperLine = line.toUpperCase();
-
-    // Passport ID label parsing
-    if (!extractedData.idNumber && (upperLine.includes("PASSPORT NO") || upperLine.includes("PASSPORT") || upperLine.includes("पासपोर्ट"))) {
-      let val = line.split(/[:/|-]/).pop().trim();
-      let candidate = val.match(/\b[A-PR-WYA-Z0-9]{7,9}\b/i);
-      if (candidate && !ignoredWords.includes(candidate[0].toUpperCase())) {
-        extractedData.idNumber = candidate[0].toUpperCase();
-      }
-    }
 
     // Surname parsing
     if (!extractedData.surname && (upperLine.includes("SURNAME") || upperLine.includes("उपनाम"))) {
@@ -729,41 +745,46 @@ function parsePassportData(rawText, pageType = "auto") {
       }
     }
 
-    // Address Parsing
+    // Address Parsing Strategy
     if (upperLine.includes("ADDRESS") || upperLine.includes("पता")) {
       capturingAddress = true;
       let startText = line.split(/[:/|-]/).pop().trim();
-      if (!startText.toUpperCase().includes("ADDRESS") && startText.length > 2) {
+
+      // Clean out "Address", "पता", and any stray Passport Number attached to the header
+      startText = startText.replace(/ADDRESS|पता/gi, "").trim();
+      if (extractedData.idNumber) {
+        startText = startText.replace(new RegExp(extractedData.idNumber, 'gi'), "").trim();
+      }
+      startText = startText.replace(/\b[A-PR-WYA-Z][0-9]{7}\b/gi, "").trim();
+
+      if (startText.length > 2) {
         addressLines.push(startText);
       }
       continue;
     }
 
     if (capturingAddress) {
-      const isStopWord = ["FILE NO", "PHOTO", "OLD PASSPORT", "DATE OF ISSUE", "PLACE OF ISSUE", "PIN:"].some(w => upperLine.includes(w));
+      const isStopWord = ["FILE NO", "PHOTO", "OLD PASSPORT", "DATE OF ISSUE", "PLACE OF ISSUE"].some(w => upperLine.includes(w));
       const isBarcode = /^R\d{7,}/i.test(line) || /BN\d{10,}/i.test(line);
 
       if (isStopWord || isBarcode) {
-        if (upperLine.includes("PIN:")) {
-          let cleanPinLine = line.replace(/[^\x00-\x7F]/g, "").trim();
-          if (cleanPinLine.length > 3) addressLines.push(cleanPinLine);
-        }
         capturingAddress = false;
+        break;
       } else {
         let englishOnlyLine = line.replace(/[^\x00-\x7F]/g, "").trim();
+        
+        // Remove Passport ID if it appears on its own line near the address
+        if (extractedData.idNumber) {
+          englishOnlyLine = englishOnlyLine.replace(new RegExp(extractedData.idNumber, 'gi'), "").trim();
+        }
+        englishOnlyLine = englishOnlyLine.replace(/\b[A-PR-WYA-Z][0-9]{7}\b/gi, "").trim();
+
         const cleanedLine = englishOnlyLine.replace(/^[^a-zA-Z0-9#]+/, "").trim();
-        if ((cleanedLine.match(/[a-zA-Z0-9]/g) || []).length > 3) {
+        
+        if ((cleanedLine.match(/[a-zA-Z0-9]/g) || []).length > 2) {
           addressLines.push(cleanedLine);
         }
       }
-    }
-  }
-
-  // Fallback Passport ID Extraction
-  if (!extractedData.idNumber) {
-    const allMatches = rawText.match(/\b[A-PR-WYA-Z][0-9]{7}\b/gi) || [];
-    if (allMatches.length > 0) {
-      extractedData.idNumber = allMatches[0].toUpperCase();
     }
   }
 
@@ -776,7 +797,10 @@ function parsePassportData(rawText, pageType = "auto") {
   }
 
   if (addressLines.length > 0) {
-    extractedData.address = addressLines.join(", ").replace(/,\s*,/g, ",").trim();
+    extractedData.address = addressLines.join(", ")
+      .replace(/,\s*,/g, ",")
+      .replace(/^[\s,:-]+/, "")
+      .trim();
   }
 
   return {
