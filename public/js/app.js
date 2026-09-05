@@ -629,17 +629,17 @@ function parsePassportData(rawText) {
   const nonPassportKeywords = [
     "AADHAAR", "AADHAR", "UIDAI", "UNIQUE IDENTIFICATION", 
     "PERMANENT ACCOUNT NUMBER", "INCOME TAX DEPARTMENT", 
-    "ELECTION COMMISSION", "VOTER", "DRIVING LICENCE"
+    "ELECTION COMMISSION", "VOTER", "DRIVING LICENCE", "DRIVING LICENSE"
   ];
 
   const containsForbiddenKeyword = nonPassportKeywords.some(keyword => upperRawText.includes(keyword));
 
-  // 2. Positive Passport Identifiers
+  // 2. Universal Passport Identifiers (ICAO 9303 Compliant)
   const passportKeywords = [
-    "PASSPORT", "REPUBLIC OF INDIA", "PASSPORT NO", "FILE NO", "GIVEN NAME", "SURNAME", "P<IND"
+    "PASSPORT", "P<", "PASSPORT NO", "FILE NO", "GIVEN NAME", "SURNAME", "REPUBLIC OF"
   ];
   const hasPassportKeyword = passportKeywords.some(keyword => upperRawText.includes(keyword));
-  const hasMRZ = /P<[A-Z0-9<]+/i.test(rawText) || /P[A-Z0-9<]{5,}/i.test(rawText);
+  const hasMRZ = /P<[A-Z0-9<]+/i.test(upperRawText) || /P[A-Z0-9<]{5,}/i.test(upperRawText);
 
   // Reject invalid / non-passport images instantly
   if (containsForbiddenKeyword || (!hasPassportKeyword && !hasMRZ)) {
@@ -648,6 +648,7 @@ function parsePassportData(rawText) {
       error: "Invalid document uploaded. Please upload a valid Passport page.",
       name: "Not found",
       idNumber: "",
+      nationality: "",
       address: "Not found",
       raw: rawText
     };
@@ -656,45 +657,69 @@ function parsePassportData(rawText) {
   // --- Document validated as Passport ---
   const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
 
-  // Extract Passport ID (Letter + 7 Digits)
-  const idMatch = rawText.match(/\b[A-PR-WYA-Z]\d{7}\b/i);
-  let idNumber = idMatch ? idMatch[0].toUpperCase() : "";
+  let extractedData = {
+    surname: "",
+    givenName: "",
+    idNumber: "",
+    nationality: "",
+    address: "Not found"
+  };
 
-  let surname = "";
-  let givenName = "";
-  let detectedAddress = "Not found";
+  // 3. Primary Extraction: ICAO Standard MRZ (Highest Reliability)
+  // Preserve newlines so that Given Name capture doesn't bleed into Line 2
+  const cleanMRZText = upperRawText.replace(/[^\S\r\n]+/g, ""); 
+  
+  // MRZ Line 1 Pattern: P<[3-letter country][Surname]<<[Given Name]
+  const mrzLine1Match = cleanMRZText.match(/P<([A-Z]{3})([A-Z<]+)<<([A-Z<]+)/);
+  if (mrzLine1Match) {
+    extractedData.nationality = mrzLine1Match[1];
+    extractedData.surname = mrzLine1Match[2].replace(/</g, " ").trim();
+    extractedData.givenName = mrzLine1Match[3].replace(/</g, " ").trim();
+  }
+
+  // MRZ Line 2 Pattern: ID number extraction (9 alphanumeric characters)
+  const mrzLine2Match = cleanMRZText.match(/[A-Z0-9<]{9}[0-9][A-Z]{3}[0-9]{6}[MF<]/i);
+  if (mrzLine2Match) {
+    extractedData.idNumber = mrzLine2Match[0].substring(0, 9).replace(/</g, "");
+  } else {
+    // Standard visual ID pattern match if MRZ Line 2 failed
+    const idMatch = rawText.match(/\b[A-PR-WYA-Z0-9]{7,9}\b/i);
+    if (idMatch) extractedData.idNumber = idMatch[0].toUpperCase();
+  }
+
+  // 4. Secondary Extraction: Visual Labels (Fallback)
+  const headers = ["SURNAME", "GIVEN NAME", "NAME", "दिया गया नाम", "उपनाम", "שם משפחה", "שם פרטי"];
+
   let capturingAddress = false;
   let addressLines = [];
-
-  const headers = ["SURNAME", "GIVEN NAME", "NAME", "दिया गया नाम", "उपनाम"];
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const upperLine = line.toUpperCase();
 
-    // Extract Surname from label
-    if (upperLine.includes("SURNAME") || upperLine.includes("उपनाम")) {
+    // Visual Label: Surname
+    if (!extractedData.surname && (upperLine.includes("SURNAME") || upperLine.includes("उपनाम") || upperLine.includes("שם משפחה"))) {
       let val = line.split(/[:/|-]/).pop().trim();
       if ((val.length < 2 || headers.some(h => val.toUpperCase() === h)) && i + 1 < lines.length) {
         val = lines[i + 1].trim();
       }
       if (!headers.some(h => val.toUpperCase().includes(h))) {
-        surname = val.replace(/[^\x00-\x7F]/g, "").trim();
+        extractedData.surname = val.replace(/[^\x00-\x7F]/g, "").trim();
       }
     }
 
-    // Extract Given Name from label
-    if (upperLine.includes("GIVEN NAME") || upperLine.includes("दिया गया नाम")) {
+    // Visual Label: Given Name
+    if (!extractedData.givenName && (upperLine.includes("GIVEN NAME") || upperLine.includes("दिया गया नाम") || upperLine.includes("שם פרטי"))) {
       let val = line.split(/[:/|-]/).pop().trim();
       if ((val.length < 2 || headers.some(h => val.toUpperCase() === h)) && i + 1 < lines.length) {
         val = lines[i + 1].trim();
       }
-      if (!headers.some(h => val.toUpperCase().includes(h))) {
-        givenName = val.replace(/[^\x00-\x7F]/g, "").trim();
+      if (!headers.some(h => val.toUpperCase().includes(h)) && !/\d/.test(val)) {
+        extractedData.givenName = val.replace(/[^\x00-\x7F]/g, "").trim();
       }
     }
 
-    // Address Parsing Trigger
+    // Address Capture Trigger (e.g., Indian Passport Back Page)
     if (upperLine.includes("ADDRESS") || upperLine.includes("पता")) {
       capturingAddress = true;
       let startText = line.split(/[:/|-]/).pop().trim();
@@ -704,10 +729,10 @@ function parsePassportData(rawText) {
       continue;
     }
 
-    // Capture Address lines until hitting metadata labels
+    // Capture Address Lines
     if (capturingAddress) {
-      const isStopWord = ["FILE NO", "PHTO", "PHOTO", "OLD PASSPORT", "DATE OF ISSUE", "PLACE OF ISSUE", "PIN:"].some(w => upperLine.includes(w));
-      const isBarcode = /^R\d{7,}/i.test(line);
+      const isStopWord = ["FILE NO", "PHOTO", "OLD PASSPORT", "DATE OF ISSUE", "PLACE OF ISSUE", "PIN:"].some(w => upperLine.includes(w));
+      const isBarcode = /^R\d{7,}/i.test(line) || /BN\d{10,}/i.test(line);
 
       if (isStopWord || isBarcode) {
         if (upperLine.includes("PIN:")) {
@@ -718,53 +743,31 @@ function parsePassportData(rawText) {
       } else {
         let englishOnlyLine = line.replace(/[^\x00-\x7F]/g, "").trim();
         const cleanedLine = englishOnlyLine.replace(/^[^a-zA-Z0-9#]+/, "").trim();
-        const letterCount = (cleanedLine.match(/[a-zA-Z0-9]/g) || []).length;
-
-        if (letterCount > 3) {
+        if ((cleanedLine.match(/[a-zA-Z0-9]/g) || []).length > 3) {
           addressLines.push(cleanedLine);
         }
       }
     }
   }
 
-  let fullName = (givenName + " " + surname).trim();
-
-  // MRZ Fallback / Enhancement: Extract name & ID from MRZ string if visual labels failed
-  const mrzLine = lines.find(l => l.startsWith("P<") || l.includes("P<IND") || (l.includes("<<") && l.length > 20));
-  
-  if (mrzLine) {
-    const cleanMRZ = mrzLine.replace(/[\s]/g, "");
-    
-    // Extract Passport Number from MRZ if not found earlier
-    if (!idNumber) {
-      const mrzIdMatch = cleanMRZ.match(/[A-Z]\d{7}/);
-      if (mrzIdMatch) idNumber = mrzIdMatch[0];
-    }
-
-    // Extract Name from MRZ
-    if (!fullName || fullName.length < 3) {
-      const mrzNamePart = cleanMRZ.replace(/^P<IND/i, "").replace(/^P</i, "").split(/<\d|\d/)[0];
-      const nameComponents = mrzNamePart.split("<<");
-      if (nameComponents.length >= 2) {
-        const mrzSurname = nameComponents[0].replace(/</g, " ").trim();
-        const mrzGiven = nameComponents[1].replace(/</g, " ").trim();
-        fullName = (mrzGiven + " " + mrzSurname).trim();
-      } else if (nameComponents.length === 1) {
-        fullName = nameComponents[0].replace(/</g, " ").trim();
-      }
-    }
+  // 5. Final Assembly
+  let fullName = "";
+  if (extractedData.givenName && extractedData.surname) {
+    fullName = `${extractedData.givenName} ${extractedData.surname}`;
+  } else {
+    fullName = extractedData.givenName || extractedData.surname || "Not found";
   }
 
-  // Format Address Output
   if (addressLines.length > 0) {
-    detectedAddress = addressLines.join(", ").replace(/,\s*,/g, ",").trim();
+    extractedData.address = addressLines.join(", ").replace(/,\s*,/g, ",").trim();
   }
 
   return {
     isValidPassport: true,
-    name: fullName.toUpperCase() || "Not found",
-    idNumber: idNumber,
-    address: detectedAddress,
+    name: fullName.toUpperCase().trim(),
+    idNumber: extractedData.idNumber || "Not found",
+    nationality: extractedData.nationality || "Not found",
+    address: extractedData.address,
     raw: rawText
   };
 }
