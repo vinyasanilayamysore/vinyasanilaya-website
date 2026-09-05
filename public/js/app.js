@@ -299,16 +299,15 @@ async function executeOcrFlow(frontBase64, backBase64, idType, nationality) {
 /* ==========================================================================
    DOCUMENT PARSERS
    ========================================================================== */
-
 function parseAadhaarData(rawText) {
-  const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 1);
+  const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
   const standardizedText = rawText.replace(/[x*×K]/g, 'X');
 
+  // 1. Identification Number Extraction
   const idRegex = /(\b[X\d]{4}\s[X\d]{4}\s\d{4}\b)|(\b\d{4}\b$)/gm;
   const matches = standardizedText.match(idRegex) || [];
   let idNumber = "";
   let fallbackId = "";
-
   const blacklisted = ["1947", "2021", "2022", "2023", "2024", "2025", "2026"];
 
   for (let i = 0; i < matches.length; i++) {
@@ -318,7 +317,6 @@ function parseAadhaarData(rawText) {
     if (cleanDigits.length === 12) {
       const matchIndex = standardizedText.indexOf(candidate);
       const contextBefore = standardizedText.substring(Math.max(0, matchIndex - 15), matchIndex).toUpperCase();
-
       if (!contextBefore.includes("VID")) {
         idNumber = candidate.toUpperCase();
         break;
@@ -326,57 +324,78 @@ function parseAadhaarData(rawText) {
     } else if (cleanDigits.length === 4 && !idNumber) {
       const matchIndex = standardizedText.indexOf(candidate);
       const contextBefore = standardizedText.substring(Math.max(0, matchIndex - 15), matchIndex).toUpperCase();
-
       if (!blacklisted.includes(candidate) && !contextBefore.includes("VID")) {
-        fallbackId = "XXXX XXXX " + candidate;
+        fallbackId = "[Aadhaar Redacted] " + candidate;
       }
     }
   }
-
   idNumber = idNumber || fallbackId;
 
+  // 2. Structural Name Extraction using Anchors (DOB/Gender)
   let detectedName = "Not found";
-  let detectedAddress = "Not found";
-  let capturingAddress = false;
-  let addressLines = [];
-
   const noiseKeywords = [
     "GOVERNMENT", "INDIA", "FATHER", "DOB", "MALE", "FEMALE",
     "ENROLLMENT", "UNIQUE", "HELP", "YEAR", "VID", "INDA",
     "WWW.", "HELP@", "ELITEBOOK", "LATITUDE", "THINKPAD", "MACBOOK", "HP", "DELL",
-    "AADHAAR", "NUMBER", "NO."
+    "AADHAAR", "NUMBER", "NO.", "ISSUE", "DATE"
   ];
-  const searchLimit = Math.floor(lines.length * 0.4);
+
+  // Strategy A: Find DOB or Gender line and look directly above it
+  let anchorIndex = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const uLine = lines[i].toUpperCase();
+    if (uLine.includes("DOB") || uLine.includes("MALE") || uLine.includes("FEMALE") || uLine.includes("DATE OF BIRTH")) {
+      anchorIndex = i;
+      break;
+    }
+  }
+
+  if (anchorIndex > 0) {
+    // Check preceding lines for valid clean English text
+    for (let i = anchorIndex - 1; i >= Math.max(0, anchorIndex - 3); i--) {
+      let candidate = lines[i].replace(/[^\x00-\x7F]/g, "").trim();
+      let uCand = candidate.toUpperCase();
+
+      const isNoise = noiseKeywords.some(word => uCand.includes(word));
+      const hasNumbers = /\d/.test(candidate);
+      const isRelation = /S\/O|D\/O|W\/O|SON OF|DAUGHTER OF|WIFE OF/i.test(uCand);
+      
+      // Basic English name structure check (Letters, spaces, periods only)
+      const isCleanEnglishName = /^[A-Za-z\s.]+$/.test(candidate) && candidate.length > 2;
+
+      if (isCleanEnglishName && !isNoise && !hasNumbers && !isRelation) {
+        detectedName = candidate;
+        break;
+      }
+    }
+  }
+
+  // Strategy B: Fallback scan if anchor line was not found
+  if (detectedName === "Not found") {
+    const searchLimit = Math.floor(lines.length * 0.5);
+    for (let i = 0; i < searchLimit; i++) {
+      let candidate = lines[i].replace(/[^\x00-\x7F]/g, "").trim();
+      let uCand = candidate.toUpperCase();
+
+      const isNoise = noiseKeywords.some(word => uCand.includes(word));
+      const hasNumbers = /\d/.test(candidate);
+      const isCleanEnglishName = /^[A-Za-z\s.]+$/.test(candidate) && candidate.length > 3;
+
+      if (isCleanEnglishName && !isNoise && !hasNumbers) {
+        detectedName = candidate;
+        break;
+      }
+    }
+  }
+
+  // 3. Address Extraction
+  let detectedAddress = "Not found";
+  let capturingAddress = false;
+  let addressLines = [];
 
   for (let i = 0; i < lines.length; i++) {
     let englishOnlyLine = lines[i].replace(/[^\x00-\x7F]/g, "").trim();
     const upperLine = englishOnlyLine.toUpperCase();
-
-    if (detectedName === "Not found" && i < searchLimit) {
-      const isWatermarkGarbage = /(UIDAI|GOI|IDAI|OIG|G0I){2,}/.test(upperLine);
-      const isRelation = /S\/O|D\/O|W\/O|SON OF|DAUGHTER OF|WIFE OF/i.test(upperLine);
-      const isNoise = noiseKeywords.some(word => upperLine.includes(word));
-      const hasNumbers = /\d/.test(englishOnlyLine);
-      const hasVowels = /[AEIOUY]/.test(upperLine);
-      const isStructuralGarbage = /^[\/\s\\|:.\-]+/.test(englishOnlyLine);
-
-      if (englishOnlyLine.length > 3 && !isRelation && !isNoise && !hasNumbers && !isWatermarkGarbage && hasVowels && !isStructuralGarbage) {
-        let potentialName = englishOnlyLine.replace(/^[:\s,-]+/, "").trim();
-
-        if (i + 1 < searchLimit) {
-          let nextLine = lines[i + 1].replace(/[^\x00-\x7F]/g, "").trim();
-          const nextUpper = nextLine.toUpperCase();
-          const nextIsNoise = noiseKeywords.some(word => nextUpper.includes(word));
-          const nextIsStructural = /^[\/\s\\|:.\-]+/.test(nextLine);
-
-          if (nextLine.length > 0 && nextLine.length < 15 && !nextIsNoise && !/\d/.test(nextLine) && !/S\/O|D\/O|W\/O/i.test(nextUpper) && !nextIsStructural) {
-            potentialName += " " + nextLine;
-            i++;
-          }
-        }
-        detectedName = potentialName;
-      }
-    }
 
     const isAddressLabel = upperLine.includes("ADDRESS");
     const isRelationTrigger = upperLine.includes("S/O") || upperLine.includes("D/O") || upperLine.includes("W/O");
