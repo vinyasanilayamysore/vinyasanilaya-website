@@ -296,6 +296,14 @@ async function executeOcrFlow(frontBase64, backBase64, idType, nationality) {
       }
     }
 
+    // Specific Passport Verification Check (Similar to Aadhaar logic)
+    if (idType === "Passport") {
+      const hasPassportIndicator = upperText.includes("PASSPORT") || upperText.includes("पासपोर्ट") || upperText.includes("REPUBLIC") || /P<[A-Z0-9<]+/i.test(upperText) || upperText.includes("FILE NO");
+      if (!hasPassportIndicator) {
+        throw new Error("Passport indicators not detected. Please upload a clear image of your Passport (Bio-data or Back page).");
+      }
+    }
+
     const idKeywords = ["GOVERNMENT", "INDIA", "INCOME TAX", "ELECTION", "DRIVING", "LICENSE", "ID", "CARD", "UNIQUE", "PASSPORT", "REPUBLIC", "AADHAAR", "AADHAR"];
     const hasIdKeywords = idKeywords.some(keyword => upperText.includes(keyword));
 
@@ -651,15 +659,10 @@ function parsePassportData(rawText, pageType = "auto") {
 
   // Reject non-passport documents immediately
   if (!isValidPassportDoc) {
-    return {
-      isValidPassport: false,
-      error: "Invalid document uploaded. Please upload a valid Passport image.",
-      name: "",
-      idNumber: "",
-      nationality: "",
-      address: "Not found",
-      raw: rawText
-    };
+    if (containsForbiddenKeyword) {
+      throw new Error("The uploaded document appears to be a different type of identity card (Aadhaar/DL/Voter). Please upload your Passport page.");
+    }
+    throw new Error("Invalid Passport document. Passport keywords or MRZ data not detected. Please try again with a clearer photo.");
   }
 
   // --- Proceed with Parsing Valid Passport Document ---
@@ -783,7 +786,6 @@ function parsePassportData(rawText, pageType = "auto") {
   }
 
   return {
-    isValidPassport: true,
     name: fullName.toUpperCase().trim(),
     idNumber: extractedData.idNumber || "Not found",
     nationality: extractedData.nationality || "Not found",
