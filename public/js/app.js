@@ -336,7 +336,7 @@ function parseAadhaarData(rawText) {
   const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
   const standardizedText = rawText.replace(/[x*×K]/g, 'X');
 
-  // 1. Identification Number Extraction
+  // 1. Aadhaar ID Number Extraction
   const idRegex = /(\b[X\d]{4}\s[X\d]{4}\s\d{4}\b)|(\b\d{4}\b$)/gm;
   const matches = standardizedText.match(idRegex) || [];
   let idNumber = "";
@@ -364,7 +364,7 @@ function parseAadhaarData(rawText) {
   }
   idNumber = idNumber || fallbackId;
 
-  // 2. Structural Name Extraction using Anchors (DOB/Gender)
+  // 2. Name Extraction using Anchor Strategy
   let detectedName = "Not found";
   const noiseKeywords = [
     "GOVERNMENT", "INDIA", "FATHER", "DOB", "MALE", "FEMALE",
@@ -373,21 +373,17 @@ function parseAadhaarData(rawText) {
     "AADHAAR", "NUMBER", "NO.", "ISSUE", "DATE", "GOVERNMENT OF INDIA", "BHARAT"
   ];
 
-  // Helper function: Validate if a line is a real English name
   function isValidNameString(str) {
     if (!str || str.length < 2) return false;
-
     const cleanStr = str.replace(/[^\x00-\x7F]/g, "").trim();
     if (!/^[A-Za-z\s.]+$/.test(cleanStr)) return false;
 
     const uStr = cleanStr.toUpperCase();
-
     if (noiseKeywords.some(word => uStr.includes(word))) return false;
     if (/\d/.test(cleanStr)) return false;
-    if (/S\/O|D\/O|W\/O|SON OF|DAUGHTER OF|WIFE OF/i.test(uStr)) return false;
+    if (/S\/O|D\/O|W\/O|C\/O|SON OF|DAUGHTER OF|WIFE OF/i.test(uStr)) return false;
 
     const words = cleanStr.split(/\s+/).filter(w => w.length > 0);
-
     const ocrGarbageRegex = /\b(jnavr|wear|wo|woa|dwo|eaar|jne|vnay)\b/i;
     if (ocrGarbageRegex.test(cleanStr)) return false;
 
@@ -397,7 +393,6 @@ function parseAadhaarData(rawText) {
     return words.some(w => /^[A-Za-z]{3,}$/.test(w));
   }
 
-  // Locate DOB / Gender anchor line and scan upwards
   let anchorIndex = -1;
   for (let i = 0; i < lines.length; i++) {
     const uLine = lines[i].toUpperCase();
@@ -417,7 +412,6 @@ function parseAadhaarData(rawText) {
         break;
       }
     }
-
     if (collectedNameParts.length > 0) {
       detectedName = collectedNameParts.join(" ");
     }
@@ -434,31 +428,31 @@ function parseAadhaarData(rawText) {
     }
   }
 
-  // 3. Precise Address Extraction Logic
+  // 3. Unified Address Extraction Strategy
   let detectedAddress = "Not found";
   let addressLines = [];
   let capturingAddress = false;
 
   const stopKeywords = [
-    "KARNATAKA", "PIN", "INDIA", "UG", "YOUR AADHAAR", "AADHAAR NO", 
-    "WWW.", "UNIQUE", "HELP", "1947", "UIDAI", "GOVERNMENT OF INDIA"
+    "YOUR AADHAAR", "AADHAAR NO", "WWW.", "UNIQUE", "HELP", 
+    "1947", "UIDAI", "GOVERNMENT OF INDIA", "HELP@UIDAI"
   ];
 
   for (let i = 0; i < lines.length; i++) {
     let englishOnlyLine = lines[i].replace(/[^\x00-\x7F]/g, "").trim();
     const upperLine = englishOnlyLine.toUpperCase();
 
-    // Trigger capture when hitting explicit house # or street identifiers
-    const isHouseOrStreetLine = /#\s*\d+|NO\.\s*\d+|\b\d+(ST|ND|RD|TH)\b|MAIN ROAD|BLOCK|CROSS|LAYOUT|STREET|NAGAR/i.test(englishOnlyLine);
+    // Trigger A: Line explicitly starts with "Address:" or contains "C/O", "S/O", "W/O", "D/O"
     const isAddressHeader = upperLine.includes("ADDRESS");
+    const isRelationPrefix = /^(C\/O|S\/O|W\/O|D\/O)[:\s]/i.test(englishOnlyLine);
+    const isHouseNumberLine = /^#\s*\d+|^NO\.\s*\d+/i.test(englishOnlyLine);
 
-    if ((isHouseOrStreetLine || isAddressHeader) && addressLines.length === 0) {
+    if ((isAddressHeader || isRelationPrefix || isHouseNumberLine) && addressLines.length === 0) {
       capturingAddress = true;
 
-      // Clean prefix if starting line contains "Address:" or relationship terms
-      let startText = englishOnlyLine.replace(/Address[:\s]*/i, "").trim();
-      startText = startText.replace(/^(S\/O|D\/O|W\/O)[:\s]*[A-Za-z\s,.-]+/i, "").trim();
-      startText = startText.replace(/^[:,\s\d]+/, "").trim();
+      // Extract full text after "Address:" keyword while keeping C/O, S/O, etc.
+      let startText = englishOnlyLine.replace(/^Address[:\s]*/i, "").trim();
+      startText = startText.replace(/^[:,\s]+/, "").trim();
 
       if (startText.length > 3) {
         addressLines.push(startText);
@@ -467,20 +461,15 @@ function parseAadhaarData(rawText) {
     }
 
     if (capturingAddress) {
-      // Exit triggers: stop at postal tracking codes, phone numbers, state/pin lines, or Aadhaar headers
+      // Exit conditions: stop capture at barcode tracks, phone numbers, or footer headers
       const isTrackingCode = /[A-Z]{2}\d{9}[A-Z]{2}/i.test(englishOnlyLine);
       const isPhoneNumber = /^\d{10}$/.test(englishOnlyLine.replace(/\s/g, ''));
-      const isPinOrState = /\b\d{6}\b/.test(englishOnlyLine) || stopKeywords.some(word => upperLine.includes(word));
+      const isFooter = stopKeywords.some(word => upperLine.includes(word));
       const isIdRepeat = idNumber && englishOnlyLine.replace(/\s/g, '').includes(idNumber.replace(/\s/g, '').slice(-4));
 
-      if (isTrackingCode || isPhoneNumber || isPinOrState || isIdRepeat) {
+      if (isTrackingCode || isPhoneNumber || isFooter || isIdRepeat) {
         capturingAddress = false;
-        break; // Stop scanning once the main address block is captured
-      }
-
-      // Skip remaining relationship tags if encountered
-      if (/^(S\/O|D\/O|W\/O|SON OF|DAUGHTER OF|WIFE OF)/i.test(upperLine)) {
-        continue;
+        break;
       }
 
       if (englishOnlyLine.replace(/[^a-zA-Z0-9]/g, "").length > 3) {
