@@ -930,7 +930,7 @@ window.handleMobileSearch = async function() {
       const docData = docSnapshot.data();
 
       // Capture existing selfie URL to allow cleanup if updated
-      existingSelfieUrl = docData.selfieUrl || null;
+      existingSelfieUrl = docData.guestDetails?.selfieUrl || docData.selfieUrl || null;
 
       console.log("✅ [Record Found] Document ID:", docSnapshot.id);
 
@@ -1352,9 +1352,10 @@ async function uploadAsset(base64Data, phone, idType, side = "") {
   // Format filename: YYYY-MM-DD-phone-type-side.jpg
   const now = new Date();
   const formattedDate = now.toISOString().split('T')[0];
+  const timestamp = now.getTime(); // Ensure uniqueness to prevent collision/accidental deletion
   const fileName = side 
-    ? `${formattedDate}-${phone}-${idType}-${side}.jpg`
-    : `${formattedDate}-${phone}-${idType}.jpg`;
+    ? `${formattedDate}-${phone}-${idType}-${side}-${timestamp}.jpg`
+    : `${formattedDate}-${phone}-${idType}-${timestamp}.jpg`;
 
   const storageRef = ref(storage, `${folderPath}/${fileName}`);
   const blob = dataURLToBlob(base64Data);
@@ -1451,7 +1452,8 @@ window.finalSubmit = async function() {
     const payload = {
       guestDetails: {
         name: (document.getElementById('name')?.value || "").trim(),
-        phone: phone
+        phone: phone,
+        ...(selfieUrl && { selfieUrl })
       },
       verification: {
         idType: idType,
@@ -1471,7 +1473,6 @@ window.finalSubmit = async function() {
         purpose: document.getElementById('purpose').value
       },
       verifiedStatus: "Verified",
-      ...(selfieUrl && { selfieUrl }),
       updatedAt: serverTimestamp()
     };
 
@@ -1501,7 +1502,7 @@ window.finalSubmit = async function() {
         "updatedAt": payload.updatedAt
       };
 
-      if (selfieUrl) updateData.selfieUrl = selfieUrl;
+      if (selfieUrl) updateData["guestDetails.selfieUrl"] = selfieUrl;
       
       // Only update ID URLs if new ones were actually uploaded
       if (idFrontUrl) updateData["verification.idFrontUrl"] = idFrontUrl;
