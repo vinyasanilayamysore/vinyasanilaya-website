@@ -1030,6 +1030,7 @@ window.toggleSecondarySections = function(checked) {
   const submitContainer = document.getElementById('submitContainer');
 
   if (checked) {
+    if (typeof validateFormCompletion === 'function') validateFormCompletion();
     secEmergency.classList.remove('d-none');
     secTravel.classList.remove('d-none');
     secSelfie.classList.remove('d-none');
@@ -1046,10 +1047,11 @@ window.toggleSecondarySections = function(checked) {
 
 window.validateFormCompletion = function() {
   const accepted = document.getElementById('termsAccepted').checked;
+  const hasSelfie = !!selfieDataBase64;
   const submitBtn = document.getElementById('submitBtn');
   const warningMsg = document.getElementById('submitWarningMessage');
 
-  if (accepted) {
+  if (accepted && hasSelfie) {
     submitBtn.disabled = false;
     submitBtn.classList.remove('opacity-50');
     warningMsg.classList.add('d-none');
@@ -1288,6 +1290,8 @@ window.takeSnapshot = function() {
     window.currentStream.getTracks().forEach(track => track.stop());
     window.currentStream = null;
   }
+
+  if (typeof validateFormCompletion === 'function') validateFormCompletion();
 };
 
 window.restartCamera = function() {
@@ -1300,6 +1304,7 @@ window.restartCamera = function() {
   if (selfieStatus) selfieStatus.innerText = "Camera ready";
   
   selfieDataBase64 = null;
+  if (typeof validateFormCompletion === 'function') validateFormCompletion();
   window.initiateSelfieProcess();
 };
 
@@ -1323,6 +1328,8 @@ window.handleFallbackSelfie = async function(input) {
       if (selfieStatus) {
         selfieStatus.innerText = "Selfie uploaded!";
       }
+
+      if (typeof validateFormCompletion === 'function') validateFormCompletion();
     } catch (err) {
       console.error("Selfie processing error:", err);
       if (typeof showNotification === 'function') {
@@ -1416,9 +1423,17 @@ window.finalSubmit = async function() {
     return;
   }
 
-  // Safety check: Ensure new guests have captured all required images
-  if (!isExisting && (!frontImageBase64 || !backImageBase64 || !selfieDataBase64)) {
-    showNotification("Capture Required", "Please ensure both ID sides are scanned and your selfie is captured.", "warning");
+  // Safety check: Selfie is ALWAYS required for both New and Existing guests
+  if (!selfieDataBase64) {
+    showNotification("Selfie Required", "Please capture a fresh selfie to verify your identity before completing check-in.", "warning");
+    submitBtn.disabled = false;
+    submitBtn.innerText = "Complete Check-in";
+    return;
+  }
+
+  // Safety check: Ensure new guests have scanned IDs
+  if (!isExisting && (!frontImageBase64 || !backImageBase64)) {
+    showNotification("ID Scan Required", "Please ensure both sides of your ID are scanned.", "warning");
     submitBtn.disabled = false;
     submitBtn.innerText = "Complete Check-in";
     return;
