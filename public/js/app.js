@@ -1454,9 +1454,9 @@ window.finalSubmit = async function() {
     const payload = {
       guestDetails: {
         name: (document.getElementById('name')?.value || "").trim(),
-        phone: phone,
-        ...(selfieUrl && { selfieUrl })
+        phone: phone
       },
+      ...(selfieUrl && { selfieUrl }),
       verification: {
         idType: idType,
         idNo: (document.getElementById('idNumber')?.value || "").trim(),
@@ -1504,7 +1504,7 @@ window.finalSubmit = async function() {
         "updatedAt": payload.updatedAt
       };
 
-      if (selfieUrl) updateData["guestDetails.selfieUrl"] = selfieUrl;
+      if (selfieUrl) updateData["selfieUrl"] = selfieUrl;
       
       // Only update ID URLs if new ones were actually uploaded
       if (idFrontUrl) updateData["verification.idFrontUrl"] = idFrontUrl;
