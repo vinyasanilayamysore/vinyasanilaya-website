@@ -212,40 +212,45 @@ window.handleIdScan = async function() {
  * @param {string} currentMobile - The phone number entered during registration
  * @returns {Promise<{conflict: boolean, existingName?: string, existingMobile?: string}>}
  */
+/**
+ * Server-side / Client-side function to check if an ID is already registered under a different mobile number.
+ */
 async function checkIdMobileAssociation(extractedId, currentMobile) {
   if (!extractedId) {
     return { conflict: false };
   }
 
   // 1. Sanitize inputs
-  const cleanIdStr = String(extractedId).trim();
-  const searchId = cleanIdStr.replace(/[\s-]/g, '').toUpperCase();
+  const rawIdStr = String(extractedId).trim().toUpperCase();
+  const cleanId = rawIdStr.replace(/[\s-]/g, '');
   const searchMobile = String(currentMobile || '').replace(/\D/g, '').slice(-10);
 
-  console.log(`🔍 [Conflict Check] Sanitized Search ID: ${searchId}, Sanitized Mobile: ${searchMobile}`);
+  console.log(`🔍 [Conflict Check] Extracted ID: ${cleanId}, Mobile: ${searchMobile}`);
 
-  // 2. Ignore empty or redacted placeholder IDs to prevent false conflicts
-  if (!searchId || searchId.includes("REDACTED") || searchId === "") {
+  // 2. Ignore empty or redacted placeholder IDs
+  if (!cleanId || cleanId.includes("REDACTED") || cleanId === "") {
     return { conflict: false };
   }
 
+  // 3. Build array of search variations (handles exact strings like "C3075733" as well as spaced formats)
+  const formattedWithSpaces = cleanId.replace(/(.{4})/g, '$1 ').trim();
+  const searchTargets = Array.from(new Set([cleanId, formattedWithSpaces, rawIdStr]));
+
   try {
-    // 3. Query the 'guests' collection matching the ID field
+    // 4. Query Firestore matching any variant of the ID
     const guestsRef = collection(db, "guests");
-    const q = query(guestsRef, where("verification.idNo", "==", searchId));
+    const q = query(guestsRef, where("verification.idNo", "in", searchTargets));
     const querySnapshot = await getDocs(q);
 
     if (!querySnapshot.empty) {
-      console.log(`✅ [Conflict Check] Record found in Firestore for ID: ${searchId}`);
-      // Document found; check associated mobile number
+      console.log(`✅ [Conflict Check] Existing record found for ID: ${cleanId}`);
+      
       const existingGuest = querySnapshot.docs[0].data();
       const existingMobile = String(existingGuest.guestDetails?.phone || '').replace(/\D/g, '').slice(-10);
 
-      console.log(`🧐 [Conflict Check] Comparing input mobile (${searchMobile}) with existing mobile (${existingMobile})`);
-
-      // 4. Return conflict if registered under a different mobile number
+      // 5. Flag conflict if registered under a different phone number
       if (existingMobile !== searchMobile && searchMobile !== "") {
-        console.warn(`⚠️ [Conflict Check] Conflict detected! This ID is registered to ${existingGuest.guestDetails?.name || 'another guest'}.`);
+        console.warn(`⚠️ [Conflict Check] Conflict detected! ID belongs to ${existingGuest.guestDetails?.name || 'another guest'}.`);
         return {
           conflict: true,
           existingName: existingGuest.guestDetails?.name || "Existing Guest",
@@ -258,11 +263,9 @@ async function checkIdMobileAssociation(extractedId, currentMobile) {
     return { conflict: false };
   } catch (error) {
     console.error("Error executing guest ID conflict query:", error);
-    // Return no conflict in error state to avoid blocking workflow, or handle error according to your app logic
     return { conflict: false };
   }
 }
-
 /**
  * Sends Base64 images to Google Cloud Vision API endpoint or handles browser extraction
  */
