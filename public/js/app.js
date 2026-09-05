@@ -366,22 +366,36 @@ function parseAadhaarData(rawText) {
   ];
 
   // Helper function: Validate if a line is a real English name (including initials like 'M D' or 'M.D.')
-  function isValidNameString(str) {
-    if (!str || str.length < 2) return false;
-    const cleanStr = str.replace(/[^\x00-\x7F]/g, "").trim();
-    if (!/^[A-Za-z\s.]+$/.test(cleanStr)) return false;
+function isValidNameString(str) {
+  if (!str || str.length < 2) return false;
 
-    const uStr = cleanStr.toUpperCase();
-    if (noiseKeywords.some(word => uStr.includes(word))) return false;
-    if (/\d/.test(cleanStr)) return false;
-    if (/S\/O|D\/O|W\/O|SON OF|DAUGHTER OF|WIFE OF/i.test(uStr)) return false;
+  // 1. Strip non-ASCII characters
+  const cleanStr = str.replace(/[^\x00-\x7F]/g, "").trim();
+  if (!/^[A-Za-z\s.]+$/.test(cleanStr)) return false;
 
-    // Must contain at least one real word with 3+ letters (e.g. "Vinaydev", "Ram", "Yaswanth")
-    const words = cleanStr.split(/\s+/).filter(w => w.length > 0);
-    const hasCoreNameWord = words.some(w => /^[A-Za-z]{3,}$/.test(w));
+  const uStr = cleanStr.toUpperCase();
 
-    return hasCoreNameWord;
-  }
+  // 2. Filter system noise and labels
+  if (noiseKeywords.some(word => uStr.includes(word))) return false;
+  if (/\d/.test(cleanStr)) return false;
+  if (/S\/O|D\/O|W\/O|SON OF|DAUGHTER OF|WIFE OF/i.test(uStr)) return false;
+
+  const words = cleanStr.split(/\s+/).filter(w => w.length > 0);
+
+  // 3. Reject OCR garbage generated from regional script
+  // Common Kannada OCR artifacts produce strings like "Jnavr", "wear", "wo", "woa", "dwo"
+  const ocrGarbageRegex = /\b(jnavr|wear|wo|woa|dwo|eaar|jne|vnay)\b/i;
+  if (ocrGarbageRegex.test(cleanStr)) return false;
+
+  // 4. Reject improbable English phonetic starts (e.g., "Jn...")
+  const invalidLetterClusters = /\b(jn|yx|qj|xj|zg|vj)\w+/i;
+  if (invalidLetterClusters.test(cleanStr)) return false;
+
+  // 5. Must contain at least one valid core name word (3+ chars)
+  const hasCoreNameWord = words.some(w => /^[A-Za-z]{3,}$/.test(w));
+
+  return hasCoreNameWord;
+}
 
   // Strategy A: Locate DOB / Gender anchor line and scan upwards
   let anchorIndex = -1;
