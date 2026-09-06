@@ -1353,9 +1353,11 @@ async function uploadAsset(base64Data, phone, idType, side = "") {
   // Format filename: YYYY-MM-DD-phone-type-side.jpg
   const now = new Date();
   const formattedDate = now.toISOString().split('T')[0];
+  // Use timestamp to prevent same-day overwrites and deletion conflicts
+  const timestamp = Date.now();
   const fileName = side 
-    ? `${formattedDate}-${phone}-${idType}-${side}.jpg`
-    : `${formattedDate}-${phone}-${idType}.jpg`;
+    ? `${formattedDate}-${phone}-${idType}-${side}-${timestamp}.jpg`
+    : `${formattedDate}-${phone}-${idType}-${timestamp}.jpg`;
 
   const storageRef = ref(storage, `${folderPath}/${fileName}`);
   const blob = dataURLToBlob(base64Data);
@@ -1478,7 +1480,8 @@ window.finalSubmit = async function() {
 
     if (isExisting && docId) {
       // If a new selfie was captured, delete the old one from storage
-      if (selfieUrl && existingSelfieUrl) {
+      // Only delete if the new URL is different from the existing one to avoid race conditions
+      if (selfieUrl && existingSelfieUrl && selfieUrl !== existingSelfieUrl) {
         try {
           const oldSelfieRef = ref(storage, existingSelfieUrl);
           await deleteObject(oldSelfieRef);
@@ -1492,6 +1495,7 @@ window.finalSubmit = async function() {
       const updateData = {
         "guestDetails.name": payload.guestDetails.name,
         "guestDetails.phone": payload.guestDetails.phone,
+        "guestDetails.selfieUrl": selfieUrl, // Ensure the new URL is always updated here
         "verification.idType": payload.verification.idType,
         "verification.idNo": payload.verification.idNo,
         "verification.address": payload.verification.address,
@@ -1502,8 +1506,6 @@ window.finalSubmit = async function() {
         "updatedAt": payload.updatedAt,
         "selfieUrl": deleteField() // Explicitly remove the legacy root-level field
       };
-
-      if (selfieUrl) updateData["guestDetails.selfieUrl"] = selfieUrl;
       
       // Only update ID URLs if new ones were actually uploaded
       if (idFrontUrl) updateData["verification.idFrontUrl"] = idFrontUrl;
