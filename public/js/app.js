@@ -6,7 +6,8 @@ import {
   getDocs, 
   addDoc, 
   doc, 
-  updateDoc, 
+  updateDoc,
+  deleteField,
   serverTimestamp 
 } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
 import { ref, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-storage.js";
@@ -163,7 +164,7 @@ window.handleIdScan = async function() {
 
     document.getElementById('name').value = (res.name && res.name !== "Not found") ? res.name : "";
     document.getElementById('idNumber').value = res.idNumber || "";
-    document.getElementById('address').value = res.address || "";
+    document.getElementById('address').value = (res.address && res.address !== "Not found") ? res.address : "";
 
     if (spinner) spinner.classList.add('d-none');
     if (btn) {
@@ -184,6 +185,21 @@ window.handleIdScan = async function() {
       if (btnText) btnText.innerText = 'Verify & Scan Document Now';
     }
     if (spinner) spinner.classList.add('d-none');
+
+    // Reset ID inputs and global Base64 holders if scan/validation fails
+    ['idFrontFile', 'idFrontCamera', 'idBackFile', 'idBackCamera'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.value = '';
+    });
+    frontImageBase64 = null;
+    backImageBase64 = null;
+
+    // Reset Preview Boxes to original instructional state
+    const frontPreview = document.getElementById('idFrontPreview');
+    const backPreview = document.getElementById('idBackPreview');
+    if (frontPreview) frontPreview.innerHTML = '<div class="py-4 text-muted"><i class="bi bi-card-image fs-1 d-block mb-2"></i>FRONT SIDE</div>';
+    if (backPreview) backPreview.innerHTML = '<div class="py-4 text-muted"><i class="bi bi-card-image fs-1 d-block mb-2"></i>BACK SIDE</div>';
+
     updateScanButtonState();
     showNotification("Scan Failed", err.message || "Could not read ID details. Please try with clearer photos.", "error");
   }
@@ -191,45 +207,66 @@ window.handleIdScan = async function() {
 
 
 /**
- * Server-side function to check if an ID is already registered under a different mobile number.
+ * Checks if an extracted document ID is already tied to a different guest phone number.
+ * 
+ * @param {string} extractedId - The ID number extracted by OCR
+ * @param {string} currentMobile - The phone number entered during registration
+ * @returns {Promise<{conflict: boolean, existingName?: string, existingMobile?: string}>}
+ */
+/**
+ * Server-side / Client-side function to check if an ID is already registered under a different mobile number.
  */
 async function checkIdMobileAssociation(extractedId, currentMobile) {
-  // Clean inputs
-  const searchId = String(extractedId || '').replace(/[\s-]/g, '').toUpperCase();
-  const searchMobile = String(currentMobile || '').replace(/[\s-+\d]{0,2}/, '').trim();
-
-  // 1. Skip if ID is empty or redacted to avoid false positives
-  if (!searchId || searchId.includes("REDACTED") || searchId === "") {
+  if (!extractedId) {
     return { conflict: false };
   }
 
+  // 1. Sanitize inputs
+  const rawIdStr = String(extractedId).trim().toUpperCase();
+  const cleanId = rawIdStr.replace(/[\s-]/g, '');
+  const searchMobile = String(currentMobile || '').replace(/\D/g, '').slice(-10);
+
+  console.log(`🔍 [Conflict Check] Extracted ID: ${cleanId}, Mobile: ${searchMobile}`);
+
+  // 2. Ignore empty or redacted placeholder IDs
+  if (!cleanId || cleanId.includes("REDACTED") || cleanId === "") {
+    return { conflict: false };
+  }
+
+  // 3. Build array of search variations (handles exact strings like "C3075733" as well as spaced formats)
+  const formattedWithSpaces = cleanId.replace(/(.{4})/g, '$1 ').trim();
+  const searchTargets = Array.from(new Set([cleanId, formattedWithSpaces, rawIdStr]));
+
   try {
-    // 2. Query your database for an existing guest with this ID
+    // 4. Query Firestore matching any variant of the ID
     const guestsRef = collection(db, "guests");
-    const q = query(guestsRef, where("verification.idNo", "==", searchId));
+    const q = query(guestsRef, where("verification.idNo", "in", searchTargets));
     const querySnapshot = await getDocs(q);
 
     if (!querySnapshot.empty) {
+      console.log(`✅ [Conflict Check] Existing record found for ID: ${cleanId}`);
+      
       const existingGuest = querySnapshot.docs[0].data();
-      const existingMobile = String(existingGuest.guestDetails?.phone || '').replace(/[\s-+\d]{0,2}/, '').trim();
+      const existingMobile = String(existingGuest.guestDetails?.phone || '').replace(/\D/g, '').slice(-10);
 
-      // 3. Flag conflict if mobile numbers don't match
+      // 5. Flag conflict if registered under a different phone number
       if (existingMobile !== searchMobile && searchMobile !== "") {
+        console.warn(`⚠️ [Conflict Check] Conflict detected! ID belongs to ${existingGuest.guestDetails?.name || 'another guest'}.`);
         return {
           conflict: true,
-          existingName: existingGuest.guestDetails?.name,
-          existingMobile: existingGuest.guestDetails?.phone
+          existingName: existingGuest.guestDetails?.name || "Existing Guest",
+          existingMobile: existingGuest.guestDetails?.phone || ""
         };
       }
     }
 
+    console.log("🟢 [Conflict Check] No conflict found or mobile numbers match.");
     return { conflict: false };
   } catch (error) {
-    console.error("Conflict check error:", error);
+    console.error("Error executing guest ID conflict query:", error);
     return { conflict: false };
   }
 }
-
 /**
  * Sends Base64 images to Google Cloud Vision API endpoint or handles browser extraction
  */
@@ -265,13 +302,30 @@ async function executeOcrFlow(frontBase64, backBase64, idType, nationality) {
 
     const combinedRawText = `${frontText}\n${backText}`.trim();
 
-    // If combined text is empty (during testing/mock), return empty schema cleanly
-    if (!combinedRawText) {
-      return { name: "", idNumber: "", address: "", raw: "" };
+    if (!combinedRawText || combinedRawText.length < 20) {
+      throw new Error("Not a correct ID proof. No readable text detected. Please upload clear photos of your Govt ID and ensure it is not a selfie.");
     }
 
     const upperText = combinedRawText.toUpperCase();
-    const idKeywords = ["GOVERNMENT", "INDIA", "INCOME TAX", "ELECTION", "DRIVING", "LICENSE", "ID", "CARD", "UNIQUE", "PASSPORT", "REPUBLIC"];
+
+    // Specific Aadhaar Verification Check
+    if (idType === "Aadhaar") {
+      const hasAadhaarKeyword = upperText.includes("AADHAAR") || upperText.includes("AADHAR");
+      
+      if (!hasAadhaarKeyword) {
+        throw new Error("Aadhaar card not recognized. Please upload clear, well-lit images of both the front and back sides for verification.");
+      }
+    }
+
+    // Specific Passport Verification Check (Similar to Aadhaar logic)
+    if (idType === "Passport") {
+      const hasPassportIndicator = upperText.includes("PASSPORT") || upperText.includes("पासपोर्ट") || upperText.includes("REPUBLIC") || /P<[A-Z0-9<]+/i.test(upperText) || upperText.includes("FILE NO");
+      if (!hasPassportIndicator) {
+        throw new Error("Passport not recognized. Please upload clear, well-lit images of your bio-data page and address page for verification.");
+      }
+    }
+
+    const idKeywords = ["GOVERNMENT", "INDIA", "INCOME TAX", "ELECTION", "DRIVING", "LICENSE", "ID", "CARD", "UNIQUE", "PASSPORT", "REPUBLIC", "AADHAAR", "AADHAR"];
     const hasIdKeywords = idKeywords.some(keyword => upperText.includes(keyword));
 
     if (!hasIdKeywords) {
@@ -299,16 +353,43 @@ async function executeOcrFlow(frontBase64, backBase64, idType, nationality) {
 /* ==========================================================================
    DOCUMENT PARSERS
    ========================================================================== */
-
 function parseAadhaarData(rawText) {
-  const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 1);
+  const upperRawText = rawText.toUpperCase();
+
+  // 1. Strict Disqualification & Positive Keyword Validation
+  const forbiddenKeywords = [
+    "DRIVING LICENCE", "DRIVING LICENSE", "PASSPORT", 
+    "ELECTION COMMISSION", "VOTER ID", "PAN CARD"
+  ];
+  
+  const aadhaarKeywords = [
+    "AADHAAR", "AADHAR", "UIDAI", "UNIQUE IDENTIFICATION", 
+    "GOVERNMENT OF INDIA", "BHARAT", "ENROLMENT NO", "VID"
+  ];
+
+  const containsForbidden = forbiddenKeywords.some(kw => upperRawText.includes(kw));
+  const containsAadhaarKeyword = aadhaarKeywords.some(kw => upperRawText.includes(kw));
+  
+  // Regex to check if a 12-digit ID or 4-digit masked/redacted pattern exists
+  const hasAadhaarPattern = /(\b[X\d]{4}\s[X\d]{4}\s\d{4}\b)|(\b\d{4}\b$)/i.test(rawText);
+
+  if (containsForbidden) {
+    throw new Error("The uploaded document appears to be a different identity card. Please upload a valid Aadhaar card image.");
+  }
+
+  if (!containsAadhaarKeyword && !hasAadhaarPattern) {
+    throw new Error("Invalid Aadhaar document. Mandatory card keywords or ID numbers were not detected. Please try again with a clear photo.");
+  }
+
+  // --- Proceed with Parsing Strategy ---
+  const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
   const standardizedText = rawText.replace(/[x*×K]/g, 'X');
 
+  // 2. ID Extraction Strategy
   const idRegex = /(\b[X\d]{4}\s[X\d]{4}\s\d{4}\b)|(\b\d{4}\b$)/gm;
   const matches = standardizedText.match(idRegex) || [];
   let idNumber = "";
   let fallbackId = "";
-
   const blacklisted = ["1947", "2021", "2022", "2023", "2024", "2025", "2026"];
 
   for (let i = 0; i < matches.length; i++) {
@@ -318,7 +399,6 @@ function parseAadhaarData(rawText) {
     if (cleanDigits.length === 12) {
       const matchIndex = standardizedText.indexOf(candidate);
       const contextBefore = standardizedText.substring(Math.max(0, matchIndex - 15), matchIndex).toUpperCase();
-
       if (!contextBefore.includes("VID")) {
         idNumber = candidate.toUpperCase();
         break;
@@ -326,91 +406,129 @@ function parseAadhaarData(rawText) {
     } else if (cleanDigits.length === 4 && !idNumber) {
       const matchIndex = standardizedText.indexOf(candidate);
       const contextBefore = standardizedText.substring(Math.max(0, matchIndex - 15), matchIndex).toUpperCase();
-
       if (!blacklisted.includes(candidate) && !contextBefore.includes("VID")) {
-        fallbackId = "XXXX XXXX " + candidate;
+        fallbackId = "[Aadhaar Redacted] " + candidate;
       }
     }
   }
-
   idNumber = idNumber || fallbackId;
 
+  // 3. Name Extraction using Anchor Strategy
   let detectedName = "Not found";
-  let detectedAddress = "Not found";
-  let capturingAddress = false;
-  let addressLines = [];
-
   const noiseKeywords = [
     "GOVERNMENT", "INDIA", "FATHER", "DOB", "MALE", "FEMALE",
     "ENROLLMENT", "UNIQUE", "HELP", "YEAR", "VID", "INDA",
     "WWW.", "HELP@", "ELITEBOOK", "LATITUDE", "THINKPAD", "MACBOOK", "HP", "DELL",
-    "AADHAAR", "NUMBER", "NO."
+    "AADHAAR", "NUMBER", "NO.", "ISSUE", "DATE", "GOVERNMENT OF INDIA", "BHARAT"
   ];
-  const searchLimit = Math.floor(lines.length * 0.4);
+
+  function isValidNameString(str) {
+    if (!str || str.length < 2) return false;
+    const cleanStr = str.replace(/[^\x00-\x7F]/g, "").trim();
+    if (!/^[A-Za-z\s.]+$/.test(cleanStr)) return false;
+
+    const uStr = cleanStr.toUpperCase();
+    if (noiseKeywords.some(word => uStr.includes(word))) return false;
+    if (/\d/.test(cleanStr)) return false;
+    if (/S\/O|D\/O|W\/O|C\/O|SON OF|DAUGHTER OF|WIFE OF/i.test(uStr)) return false;
+
+    const words = cleanStr.split(/\s+/).filter(w => w.length > 0);
+    const ocrGarbageRegex = /\b(jnavr|wear|wo|woa|dwo|eaar|jne|vnay)\b/i;
+    if (ocrGarbageRegex.test(cleanStr)) return false;
+
+    const invalidLetterClusters = /\b(jn|yx|qj|xj|zg|vj)\w+/i;
+    if (invalidLetterClusters.test(cleanStr)) return false;
+
+    return words.some(w => /^[A-Za-z]{3,}$/.test(w));
+  }
+
+  let anchorIndex = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const uLine = lines[i].toUpperCase();
+    if (uLine.includes("DOB") || uLine.includes("MALE") || uLine.includes("FEMALE") || uLine.includes("DATE OF BIRTH")) {
+      anchorIndex = i;
+      break;
+    }
+  }
+
+  if (anchorIndex > 0) {
+    let collectedNameParts = [];
+    for (let i = anchorIndex - 1; i >= Math.max(0, anchorIndex - 5); i--) {
+      let candidate = lines[i].replace(/[^\x00-\x7F]/g, "").trim();
+      if (isValidNameString(candidate)) {
+        collectedNameParts.unshift(candidate);
+      } else if (collectedNameParts.length > 0) {
+        break;
+      }
+    }
+    if (collectedNameParts.length > 0) {
+      detectedName = collectedNameParts.join(" ");
+    }
+  }
+
+  if (detectedName === "Not found") {
+    const searchLimit = Math.floor(lines.length * 0.6);
+    for (let i = 0; i < searchLimit; i++) {
+      let candidate = lines[i].replace(/[^\x00-\x7F]/g, "").trim();
+      if (isValidNameString(candidate)) {
+        detectedName = candidate;
+        break;
+      }
+    }
+  }
+
+  // 4. Unified Address Extraction Strategy
+  let detectedAddress = "Not found";
+  let addressLines = [];
+  let capturingAddress = false;
+
+  const stopKeywords = [
+    "YOUR AADHAAR", "AADHAAR NO", "WWW.", "UNIQUE", "HELP", 
+    "1947", "UIDAI", "GOVERNMENT OF INDIA", "HELP@UIDAI"
+  ];
 
   for (let i = 0; i < lines.length; i++) {
     let englishOnlyLine = lines[i].replace(/[^\x00-\x7F]/g, "").trim();
     const upperLine = englishOnlyLine.toUpperCase();
 
-    if (detectedName === "Not found" && i < searchLimit) {
-      const isWatermarkGarbage = /(UIDAI|GOI|IDAI|OIG|G0I){2,}/.test(upperLine);
-      const isRelation = /S\/O|D\/O|W\/O|SON OF|DAUGHTER OF|WIFE OF/i.test(upperLine);
-      const isNoise = noiseKeywords.some(word => upperLine.includes(word));
-      const hasNumbers = /\d/.test(englishOnlyLine);
-      const hasVowels = /[AEIOUY]/.test(upperLine);
-      const isStructuralGarbage = /^[\/\s\\|:.\-]+/.test(englishOnlyLine);
+    const isAddressHeader = upperLine.includes("ADDRESS");
+    const isRelationPrefix = /^(C\/O|S\/O|W\/O|D\/O)[:\s]/i.test(englishOnlyLine);
+    const isHouseNumberLine = /^#\s*\d+|^NO\.\s*\d+/i.test(englishOnlyLine);
 
-      if (englishOnlyLine.length > 3 && !isRelation && !isNoise && !hasNumbers && !isWatermarkGarbage && hasVowels && !isStructuralGarbage) {
-        let potentialName = englishOnlyLine.replace(/^[:\s,-]+/, "").trim();
-
-        if (i + 1 < searchLimit) {
-          let nextLine = lines[i + 1].replace(/[^\x00-\x7F]/g, "").trim();
-          const nextUpper = nextLine.toUpperCase();
-          const nextIsNoise = noiseKeywords.some(word => nextUpper.includes(word));
-          const nextIsStructural = /^[\/\s\\|:.\-]+/.test(nextLine);
-
-          if (nextLine.length > 0 && nextLine.length < 15 && !nextIsNoise && !/\d/.test(nextLine) && !/S\/O|D\/O|W\/O/i.test(nextUpper) && !nextIsStructural) {
-            potentialName += " " + nextLine;
-            i++;
-          }
-        }
-        detectedName = potentialName;
-      }
-    }
-
-    const isAddressLabel = upperLine.includes("ADDRESS");
-    const isRelationTrigger = upperLine.includes("S/O") || upperLine.includes("D/O") || upperLine.includes("W/O");
-
-    if (isAddressLabel || isRelationTrigger) {
-      if (capturingAddress) { addressLines = []; }
+    if ((isAddressHeader || isRelationPrefix || isHouseNumberLine) && addressLines.length === 0) {
       capturingAddress = true;
 
-      let startText = englishOnlyLine.replace(/Address[:\s]*/i, "").trim();
-      startText = startText.replace(/^[:,\s\d]+/, "").trim();
+      let startText = englishOnlyLine.replace(/^Address[:\s]*/i, "").trim();
+      startText = startText.replace(/^[:,\s]+/, "").trim();
 
-      if (startText.replace(/[^a-zA-Z]/g, "").length > 3) {
+      if (startText.length > 3) {
         addressLines.push(startText);
       }
       continue;
     }
 
     if (capturingAddress) {
-      const isFooter = ["WWW.", "UNIQUE", "HELP", "1947", "UIDAI"].some(word => upperLine.includes(word));
+      const isTrackingCode = /[A-Z]{2}\d{9}[A-Z]{2}/i.test(englishOnlyLine);
+      const isPhoneNumber = /^\d{10}$/.test(englishOnlyLine.replace(/\s/g, ''));
+      const isFooter = stopKeywords.some(word => upperLine.includes(word));
       const isIdRepeat = idNumber && englishOnlyLine.replace(/\s/g, '').includes(idNumber.replace(/\s/g, '').slice(-4));
 
-      if (isFooter || isIdRepeat) {
+      if (isTrackingCode || isPhoneNumber || isFooter || isIdRepeat) {
         capturingAddress = false;
-      } else {
-        if (englishOnlyLine.replace(/[^a-zA-Z]/g, "").length > 3) {
-          addressLines.push(englishOnlyLine);
-        }
+        break;
+      }
+
+      if (englishOnlyLine.replace(/[^a-zA-Z0-9]/g, "").length > 3) {
+        addressLines.push(englishOnlyLine);
       }
     }
   }
 
   if (addressLines.length > 0) {
-    detectedAddress = addressLines.join(", ").replace(/,\s*,/g, ",").trim();
-    detectedAddress = detectedAddress.replace(/^(Address|S\/O|D\/O|W\/O)\s+\1/i, "$1");
+    detectedAddress = addressLines.join(", ")
+      .replace(/,\s*,/g, ",")
+      .replace(/^[\s,:-]+/, "")
+      .trim();
   }
 
   return { name: detectedName, idNumber: idNumber || "", address: detectedAddress, raw: rawText };
@@ -552,87 +670,203 @@ function parseDrivingLicenseData(combinedText) {
   return { name: detectedName, idNumber: idNumber, address: detectedAddress, raw: combinedText };
 }
 
-function parsePassportData(rawText) {
-  const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 1);
-  const idMatch = rawText.match(/[A-Z]\d{7}/i);
+function parsePassportData(rawText, pageType = "auto") {
+  const upperRawText = rawText ? rawText.toUpperCase().trim() : "";
 
-  let surname = "";
-  let givenName = "";
-  let detectedAddress = "Not found";
+  // 0. Immediate Reject for Empty OCR / Selfies / Non-Text Photos
+  if (!upperRawText || upperRawText.length < 20) {
+    throw new Error("No readable text detected in the uploaded image. Please ensure you upload a clear photo of your Passport.");
+  }
+
+  // Helper function to check if string contains any of the keywords
+  function upperRuleIncludesAny(text, keywords) {
+    return keywords.some(kw => text.includes(kw));
+  }
+
+  // 1. Strict Disqualification for Non-Passport Documents
+  const nonPassportKeywords = [
+    "DRIVING LICENCE", "DRIVING LICENSE", "MOTOR VEHICLE", "UNION MOTOR", 
+    "TRANSPORT DEPARTMENT", "DL NO", "DL NUMBER", "AUTHORITY TO DRIVE",
+    "AADHAAR", "AADHAR", "UIDAI", "UNIQUE IDENTIFICATION", 
+    "PERMANENT ACCOUNT NUMBER", "INCOME TAX DEPARTMENT", 
+    "ELECTION COMMISSION", "VOTER"
+  ];
+
+  const containsForbiddenKeyword = nonPassportKeywords.some(keyword => upperRawText.includes(keyword));
+
+  if (containsForbiddenKeyword) {
+    throw new Error("The uploaded document appears to be a different type of identity card. Please upload your Passport page.");
+  }
+
+  // 2. Strict Positive Passport Identification
+  const hasMRZ = /P<[A-Z0-9<]+/i.test(upperRawText) || /P[A-Z0-9<]{5,}/i.test(upperRawText);
+  const containsPassportWord = upperRawText.includes("PASSPORT") || upperRawText.includes("पासपोर्ट");
+  const containsRepublicOf = upperRawText.includes("REPUBLIC OF INDIA") || upperRawText.includes("REPUBLIC OF");
+  
+  // Strict Back Page Check
+  const hasBackPageHeader = upperRawText.includes("FILE NO") || upperRuleIncludesAny(upperRawText, ["NAME OF FATHER", "NAME OF MOTHER", "NAME OF SPOUSE"]);
+  const hasBackPageAddress = upperRawText.includes("ADDRESS") || upperRawText.includes("OLD PASSPORT") || upperRawText.includes("पता");
+  const isPassportBackPage = hasBackPageHeader && hasBackPageAddress;
+
+  const isValidPassportDoc = (hasMRZ || containsPassportWord || containsRepublicOf || isPassportBackPage);
+
+  if (!isValidPassportDoc) {
+    throw new Error("Invalid Passport document. Mandatory Passport keywords or MRZ data were not detected. Please try again with a clearer photo.");
+  }
+
+  // --- Proceed with Parsing ---
+  const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+
+  let extractedData = {
+    surname: "",
+    givenName: "",
+    idNumber: "",
+    nationality: "",
+    address: "Not found"
+  };
+
+  // 3. Primary MRZ Extraction
+  const cleanMRZText = upperRawText.replace(/[^\S\r\n]+/g, ""); 
+  
+  // MRZ Line 1: P<[3-letter country][Surname]<<[Given Name]
+  const mrzLine1Match = cleanMRZText.match(/P<([A-Z]{3})([A-Z<]+)<<([A-Z<]+)/);
+  if (mrzLine1Match) {
+    extractedData.nationality = mrzLine1Match[1];
+    extractedData.surname = mrzLine1Match[2].replace(/</g, " ").trim();
+    extractedData.givenName = mrzLine1Match[3].replace(/</g, " ").trim();
+  }
+
+  // MRZ Line 2: Passport Number (9 alphanumeric characters)
+  const mrzLine2Match = cleanMRZText.match(/([A-Z0-9<]{9})[0-9][A-Z]{3}[0-9]{6}/i);
+  if (mrzLine2Match) {
+    extractedData.idNumber = mrzLine2Match[1].replace(/</g, "");
+  }
+
+  // 4. Fallback/Visual Label Passport ID Extraction
+  if (!extractedData.idNumber) {
+    for (let line of lines) {
+      const upperLine = line.toUpperCase();
+      if (upperLine.includes("PASSPORT NO") || upperLine.includes("PASSPORT") || upperLine.includes("पासपोर्ट")) {
+        let val = line.split(/[:/|-]/).pop().trim();
+        let candidate = val.match(/\b[A-PR-WYA-Z][0-9]{7}\b/i);
+        if (candidate) {
+          extractedData.idNumber = candidate[0].toUpperCase();
+          break;
+        }
+      }
+    }
+    if (!extractedData.idNumber) {
+      const allMatches = rawText.match(/\b[A-PR-WYA-Z][0-9]{7}\b/gi) || [];
+      if (allMatches.length > 0) {
+        extractedData.idNumber = allMatches[0].toUpperCase();
+      }
+    }
+  }
+
+  // 5. Visual Label Extractions (Name & Address)
+  const headers = ["SURNAME", "GIVEN NAME", "NAME", "दिया गया नाम", "उपनाम", "PASSPORT"];
   let capturingAddress = false;
   let addressLines = [];
-
-  const headers = ["SURNAME", "GIVEN NAME", "NAME", "दिया गया नाम", "उपनाम"];
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const upperLine = line.toUpperCase();
 
-    if (upperLine.includes("SURNAME") || upperLine.includes("उपनाम")) {
+    // Surname parsing
+    if (!extractedData.surname && (upperLine.includes("SURNAME") || upperLine.includes("उपनाम"))) {
       let val = line.split(/[:/|-]/).pop().trim();
-      if (val.length < 3 && i + 1 < lines.length) val = lines[i + 1].trim();
+      if ((val.length < 2 || headers.some(h => val.toUpperCase() === h)) && i + 1 < lines.length) {
+        val = lines[i + 1].trim();
+      }
       if (!headers.some(h => val.toUpperCase().includes(h))) {
-        surname = val.replace(/[^\x00-\x7F]/g, "").trim();
+        extractedData.surname = val.replace(/[^\x00-\x7F]/g, "").trim();
       }
     }
 
-    if (upperLine.includes("GIVEN NAME") || upperLine.includes("दिया गया नाम")) {
+    // Given Name parsing
+    if (!extractedData.givenName && (upperLine.includes("GIVEN NAME") || upperLine.includes("दिया गया नाम"))) {
       let val = line.split(/[:/|-]/).pop().trim();
-      if (val.length < 3 && i + 1 < lines.length) val = lines[i + 1].trim();
-      if (!headers.some(h => val.toUpperCase().includes(h))) {
-        givenName = val.replace(/[^\x00-\x7F]/g, "").trim();
+      if ((val.length < 2 || headers.some(h => val.toUpperCase() === h)) && i + 1 < lines.length) {
+        val = lines[i + 1].trim();
+      }
+      if (!headers.some(h => val.toUpperCase().includes(h)) && !/\d/.test(val)) {
+        extractedData.givenName = val.replace(/[^\x00-\x7F]/g, "").trim();
       }
     }
 
+    // Address Parsing Strategy
     if (upperLine.includes("ADDRESS") || upperLine.includes("पता")) {
       capturingAddress = true;
       let startText = line.split(/[:/|-]/).pop().trim();
-      if (startText.toUpperCase() !== "ADDRESS" && startText.length > 2) {
+
+      startText = startText.replace(/ADDRESS|पता/gi, "").trim();
+      if (extractedData.idNumber) {
+        startText = startText.replace(new RegExp(extractedData.idNumber, 'gi'), "").trim();
+      }
+      startText = startText.replace(/\b[A-PR-WYA-Z][0-9]{7}\b/gi, "").trim();
+
+      if (startText.length > 2) {
         addressLines.push(startText);
       }
       continue;
     }
 
     if (capturingAddress) {
-      const isStopWord = ["PIN:", "FILE NO", "PHTO", "OLD PASSPORT", "DATE"].some(word => upperLine.includes(word));
-      const isDate = /\d{2}\/\d{2}\/\d{4}/.test(line);
-      let englishOnlyLine = line.replace(/[^\x00-\x7F]/g, "").trim();
+      const isStopWord = ["FILE NO", "PHOTO", "OLD PASSPORT", "DATE OF ISSUE", "PLACE OF ISSUE"].some(w => upperLine.includes(w));
+      const isBarcode = /^R\d{7,}/i.test(line) || /BN\d{10,}/i.test(line);
 
-      if (isStopWord || isDate) {
+      if (isStopWord || isBarcode) {
         capturingAddress = false;
+        break;
       } else {
-        const cleanedLine = englishOnlyLine.replace(/^[^a-zA-Z0-9#]+/, "").trim();
-        const letterCount = (cleanedLine.match(/[a-zA-Z0-9]/g) || []).length;
-        const totalCount = cleanedLine.length;
+        let englishOnlyLine = line.replace(/[^\x00-\x7F]/g, "").trim();
+        
+        if (extractedData.idNumber) {
+          englishOnlyLine = englishOnlyLine.replace(new RegExp(extractedData.idNumber, 'gi'), "").trim();
+        }
+        englishOnlyLine = englishOnlyLine.replace(/\b[A-PR-WYA-Z][0-9]{7}\b/gi, "").trim();
 
-        if (letterCount > 5 && (letterCount / totalCount) > 0.5) {
+        const cleanedLine = englishOnlyLine.replace(/^[^a-zA-Z0-9#]+/, "").trim();
+        
+        if ((cleanedLine.match(/[a-zA-Z0-9]/g) || []).length > 2) {
           addressLines.push(cleanedLine);
         }
       }
     }
   }
 
-  let fullName = (givenName + " " + surname).trim();
+  // Final Assembly
+  let fullName = "";
+  if (extractedData.givenName && extractedData.surname) {
+    fullName = `${extractedData.givenName} ${extractedData.surname}`;
+  } else {
+    fullName = extractedData.givenName || extractedData.surname || "";
+  }
 
-  if (!fullName || fullName.length < 5 || fullName.toUpperCase().includes("SURNAME")) {
-    const mrzLine = lines.find(l => l.startsWith("P<") || l.includes("<<"));
-    if (mrzLine) {
-      const cleanMRZ = mrzLine.replace(/^P.[A-Z]{3}/i, "").replace(/^P</i, "");
-      const parts = cleanMRZ.split("<<");
-      if (parts.length >= 2) {
-        const mrzSurname = parts[0].replace(/</g, " ").trim();
-        const mrzGiven = parts[1].replace(/</g, " ").trim();
-        const finalSurname = mrzSurname.replace(/^[P|I|N|D|K]{1,5}\s+/i, "").trim();
-        fullName = (mrzGiven + " " + finalSurname).trim();
-      }
-    }
+  // 6. Final Integrity Check: Reject if both ID number and Name are missing
+  if (!extractedData.idNumber && !fullName) {
+    throw new Error("Could not extract valid Passport details. Please upload a clearer image of your Passport bio-data or address page.");
   }
 
   if (addressLines.length > 0) {
-    detectedAddress = addressLines.join(", ").replace(/,\s*,/g, ",").trim();
+    extractedData.address = addressLines.join(", ")
+      .replace(/,\s*,/g, ",")
+      .replace(/^[\s,:-]+/, "")
+      .trim();
   }
 
-  return { name: fullName.toUpperCase() || "Not found", idNumber: idMatch ? idMatch[0].toUpperCase() : "", address: detectedAddress, raw: rawText };
+  return {
+    name: fullName.toUpperCase().trim() || "Not found",
+    idNumber: extractedData.idNumber || "Not found",
+    nationality: extractedData.nationality || "Not found",
+    address: extractedData.address,
+    raw: rawText
+  };
+}
+
+// Helper utility
+function upperRuleIncludesAny(str, arr) {
+  return arr.some(item => str.includes(item));
 }
 
 /**
@@ -646,6 +880,12 @@ window.handleMobileSearch = async function() {
     console.error("❌ 'searchMobile' element not found in DOM.");
     return;
   }
+
+  // Reset local state to prevent data leakage between different guest searches
+  frontImageBase64 = null;
+  backImageBase64 = null;
+  selfieDataBase64 = null;
+  existingSelfieUrl = null;
 
   const mobileInput = searchInput.value ? searchInput.value.trim().replace(/\D/g, '') : '';
 
@@ -697,7 +937,7 @@ window.handleMobileSearch = async function() {
       const docData = docSnapshot.data();
 
       // Capture existing selfie URL to allow cleanup if updated
-      existingSelfieUrl = docData.selfieUrl || null;
+      existingSelfieUrl = docData.guestDetails?.selfieUrl || docData.selfieUrl || null;
 
       console.log("✅ [Record Found] Document ID:", docSnapshot.id);
 
@@ -709,11 +949,15 @@ window.handleMobileSearch = async function() {
       // Populate UI fields
       const guestName = docData.guestDetails?.name || '';
       const idNo = docData.verification?.idNo || '';
+      const guestAddress = docData.verification?.address || '';
 
       const nameEl = document.getElementById('name');
       const idNumEl = document.getElementById('idNumber');
+      const addrEl = document.getElementById('address');
+
       if (nameEl) nameEl.value = guestName;
       if (idNumEl) idNumEl.value = idNo;
+      if (addrEl) addrEl.value = guestAddress;
 
       if (docData.emergencyContact) {
         const emName = document.getElementById('emergencyName');
@@ -738,7 +982,10 @@ window.handleMobileSearch = async function() {
       if (idUploadSec) idUploadSec.classList.add('d-none');
       if (ocrConfirm) ocrConfirm.classList.remove('d-none');
 
-      if (typeof toggleSecondarySections === 'function') toggleSecondarySections(true);
+      // Reset verification checkbox and ensure secondary sections are hidden until confirmed
+      const detailsVerifiedEl = document.getElementById('detailsVerified');
+      if (detailsVerifiedEl) detailsVerifiedEl.checked = false;
+      if (typeof toggleSecondarySections === 'function') toggleSecondarySections(false);
 
       if (typeof window.logToScreen === 'function') {
         window.logToScreen('INFO', `Pre-populated existing record for ${guestName} (${docSnapshot.id})`);
@@ -790,6 +1037,7 @@ window.toggleSecondarySections = function(checked) {
   const submitContainer = document.getElementById('submitContainer');
 
   if (checked) {
+    if (typeof validateFormCompletion === 'function') validateFormCompletion();
     secEmergency.classList.remove('d-none');
     secTravel.classList.remove('d-none');
     secSelfie.classList.remove('d-none');
@@ -806,10 +1054,11 @@ window.toggleSecondarySections = function(checked) {
 
 window.validateFormCompletion = function() {
   const accepted = document.getElementById('termsAccepted').checked;
+  const hasSelfie = !!selfieDataBase64;
   const submitBtn = document.getElementById('submitBtn');
   const warningMsg = document.getElementById('submitWarningMessage');
 
-  if (accepted) {
+  if (accepted && hasSelfie) {
     submitBtn.disabled = false;
     submitBtn.classList.remove('opacity-50');
     warningMsg.classList.add('d-none');
@@ -1048,6 +1297,8 @@ window.takeSnapshot = function() {
     window.currentStream.getTracks().forEach(track => track.stop());
     window.currentStream = null;
   }
+
+  if (typeof validateFormCompletion === 'function') validateFormCompletion();
 };
 
 window.restartCamera = function() {
@@ -1060,6 +1311,7 @@ window.restartCamera = function() {
   if (selfieStatus) selfieStatus.innerText = "Camera ready";
   
   selfieDataBase64 = null;
+  if (typeof validateFormCompletion === 'function') validateFormCompletion();
   window.initiateSelfieProcess();
 };
 
@@ -1083,6 +1335,8 @@ window.handleFallbackSelfie = async function(input) {
       if (selfieStatus) {
         selfieStatus.innerText = "Selfie uploaded!";
       }
+
+      if (typeof validateFormCompletion === 'function') validateFormCompletion();
     } catch (err) {
       console.error("Selfie processing error:", err);
       if (typeof showNotification === 'function') {
@@ -1101,13 +1355,15 @@ async function uploadAsset(base64Data, phone, idType, side = "") {
   
   const currentYear = new Date().getFullYear();
   const folderPath = `identity_proofs/QID-${currentYear}`;
+  // Generate a unique timestamp to prevent filename collisions.
+  // This ensures that when we delete an 'old' selfie, we aren't deleting the new one 
+  // just because they were uploaded on the same day.
+  const timestamp = Date.now();
   
-  // Format filename: YYYY-MM-DD-phone-type-side.jpg
-  const now = new Date();
-  const formattedDate = now.toISOString().split('T')[0];
+  const formattedDate = new Date().toISOString().split('T')[0];
   const fileName = side 
-    ? `${formattedDate}-${phone}-${idType}-${side}.jpg`
-    : `${formattedDate}-${phone}-${idType}.jpg`;
+    ? `${formattedDate}-${timestamp}-${phone}-${idType}-${side}.jpg`
+    : `${formattedDate}-${timestamp}-${phone}-${idType}.jpg`;
 
   const storageRef = ref(storage, `${folderPath}/${fileName}`);
   const blob = dataURLToBlob(base64Data);
@@ -1161,9 +1417,32 @@ window.finalSubmit = async function() {
   const docId = document.getElementById('rowNumber').value;
   const idType = document.getElementById('idType').value || 'Aadhaar';
 
-  // Safety check: Ensure new guests have captured all required images
-  if (!isExisting && (!frontImageBase64 || !backImageBase64 || !selfieDataBase64)) {
-    showNotification("Capture Required", "Please ensure both ID sides are scanned and your selfie is captured.", "warning");
+  // Safety check: Final verification against ID duplicates
+  const finalIdNo = (document.getElementById('idNumber')?.value || "").trim();
+  const conflictCheck = await checkIdMobileAssociation(finalIdNo, phone);
+  
+  if (conflictCheck && conflictCheck.conflict) {
+    showNotification(
+      "Security Alert", 
+      `This identification number is already recorded under another profile (${conflictCheck.existingName || 'Existing Guest'}). Please use your registered mobile number or correct the ID.`, 
+      "error"
+    );
+    submitBtn.disabled = false;
+    submitBtn.innerText = "Complete Check-in";
+    return;
+  }
+
+  // Safety check: Selfie is ALWAYS required for both New and Existing guests
+  if (!selfieDataBase64) {
+    showNotification("Selfie Required", "Please capture a fresh selfie to verify your identity before completing check-in.", "warning");
+    submitBtn.disabled = false;
+    submitBtn.innerText = "Complete Check-in";
+    return;
+  }
+
+  // Safety check: Ensure new guests have scanned IDs
+  if (!isExisting && (!frontImageBase64 || !backImageBase64)) {
+    showNotification("ID Scan Required", "Please ensure both sides of your ID are scanned.", "warning");
     submitBtn.disabled = false;
     submitBtn.innerText = "Complete Check-in";
     return;
@@ -1181,11 +1460,13 @@ window.finalSubmit = async function() {
     const payload = {
       guestDetails: {
         name: (document.getElementById('name')?.value || "").trim(),
-        phone: phone
+        phone: phone,
+        ...(selfieUrl && { selfieUrl })
       },
       verification: {
         idType: idType,
         idNo: (document.getElementById('idNumber')?.value || "").trim(),
+        address: (document.getElementById('address')?.value || "").trim(),
         verified: document.getElementById('detailsVerified')?.checked || false,
         // Newly uploaded ID URLs are now stored here
         ...(idFrontUrl && { idFrontUrl }),
@@ -1200,13 +1481,13 @@ window.finalSubmit = async function() {
         purpose: document.getElementById('purpose').value
       },
       verifiedStatus: "Verified",
-      ...(selfieUrl && { selfieUrl }),
       updatedAt: serverTimestamp()
     };
 
     if (isExisting && docId) {
       // If a new selfie was captured, delete the old one from storage
-      if (selfieUrl && existingSelfieUrl) {
+      // Only delete if the new URL is different from the existing one to avoid race conditions
+      if (selfieUrl && existingSelfieUrl && selfieUrl !== existingSelfieUrl) {
         try {
           const oldSelfieRef = ref(storage, existingSelfieUrl);
           await deleteObject(oldSelfieRef);
@@ -1220,16 +1501,17 @@ window.finalSubmit = async function() {
       const updateData = {
         "guestDetails.name": payload.guestDetails.name,
         "guestDetails.phone": payload.guestDetails.phone,
+        "guestDetails.selfieUrl": selfieUrl, // Ensure the new URL is always updated here
         "verification.idType": payload.verification.idType,
         "verification.idNo": payload.verification.idNo,
+        "verification.address": payload.verification.address,
         "verification.verified": payload.verification.verified,
         "emergencyContact": payload.emergencyContact,
         "travelDetails": payload.travelDetails,
         "verifiedStatus": payload.verifiedStatus,
-        "updatedAt": payload.updatedAt
+        "updatedAt": payload.updatedAt,
+        "selfieUrl": deleteField() // Explicitly remove the legacy root-level field
       };
-
-      if (selfieUrl) updateData.selfieUrl = selfieUrl;
       
       // Only update ID URLs if new ones were actually uploaded
       if (idFrontUrl) updateData["verification.idFrontUrl"] = idFrontUrl;
@@ -1419,6 +1701,17 @@ document.addEventListener('DOMContentLoaded', function() {
       console.log("🖱️ Search button clicked. Executing handleMobileSearch...");
       if (typeof window.handleMobileSearch === 'function') {
         window.handleMobileSearch();
+      }
+    });
+  }
+
+  // --- 3. IDENTITY VERIFICATION CHECKBOX LISTENER ---
+  // Ensures Emergency and Travel sections only appear after ID details are confirmed
+  const detailsVerified = document.getElementById('detailsVerified');
+  if (detailsVerified) {
+    detailsVerified.addEventListener('change', function() {
+      if (typeof toggleSecondarySections === 'function') {
+        toggleSecondarySections(this.checked);
       }
     });
   }
