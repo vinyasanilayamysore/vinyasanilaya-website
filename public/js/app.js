@@ -881,6 +881,12 @@ window.handleMobileSearch = async function() {
     return;
   }
 
+  // Reset local state to prevent data leakage between different guest searches
+  frontImageBase64 = null;
+  backImageBase64 = null;
+  selfieDataBase64 = null;
+  existingSelfieUrl = null;
+
   const mobileInput = searchInput.value ? searchInput.value.trim().replace(/\D/g, '') : '';
 
   console.log("🔍 [Search Started] Cleaned Mobile Input:", mobileInput);
@@ -1349,13 +1355,15 @@ async function uploadAsset(base64Data, phone, idType, side = "") {
   
   const currentYear = new Date().getFullYear();
   const folderPath = `identity_proofs/QID-${currentYear}`;
+  // Generate a unique timestamp to prevent filename collisions.
+  // This ensures that when we delete an 'old' selfie, we aren't deleting the new one 
+  // just because they were uploaded on the same day.
+  const timestamp = Date.now();
   
-  // Format filename: YYYY-MM-DD-phone-type-side.jpg
-  const now = new Date();
-  const formattedDate = now.toISOString().split('T')[0];
+  const formattedDate = new Date().toISOString().split('T')[0];
   const fileName = side 
-    ? `${formattedDate}-${phone}-${idType}-${side}.jpg`
-    : `${formattedDate}-${phone}-${idType}.jpg`;
+    ? `${formattedDate}-${timestamp}-${phone}-${idType}-${side}.jpg`
+    : `${formattedDate}-${timestamp}-${phone}-${idType}.jpg`;
 
   const storageRef = ref(storage, `${folderPath}/${fileName}`);
   const blob = dataURLToBlob(base64Data);
