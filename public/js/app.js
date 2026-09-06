@@ -1353,11 +1353,9 @@ async function uploadAsset(base64Data, phone, idType, side = "") {
   // Format filename: YYYY-MM-DD-phone-type-side.jpg
   const now = new Date();
   const formattedDate = now.toISOString().split('T')[0];
-  // Use timestamp to prevent same-day overwrites and deletion conflicts
-  const timestamp = Date.now();
   const fileName = side 
-    ? `${formattedDate}-${phone}-${idType}-${side}-${timestamp}.jpg`
-    : `${formattedDate}-${phone}-${idType}-${timestamp}.jpg`;
+    ? `${formattedDate}-${phone}-${idType}-${side}.jpg`
+    : `${formattedDate}-${phone}-${idType}.jpg`;
 
   const storageRef = ref(storage, `${folderPath}/${fileName}`);
   const blob = dataURLToBlob(base64Data);
